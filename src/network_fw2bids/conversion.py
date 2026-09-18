@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 from tempfile import TemporaryDirectory
 from typing import Any, Callable, Sequence
@@ -89,6 +90,10 @@ class DicomConverter:
         try:
             with zipfile.ZipFile(archive_path) as archive:
                 for member in archive.infolist():
+                    if stat.S_ISLNK(member.external_attr >> 16):
+                        raise ValueError(
+                            f"unsafe symbolic link in DICOM archive: {member.filename!r}"
+                        )
                     target = (destination / member.filename).resolve()
                     if target != root and root not in target.parents:
                         raise ValueError(
@@ -128,6 +133,7 @@ class DicomConverter:
                     f"expected one converted image for {plan.acquisition.label!r}, "
                     f"found {len(images)}"
                 )
+            cls._require_new_image_outputs(images[0], plan.relative_prefix, dataset_root)
             cls._place_image(images[0], plan, dataset_root)
             return
 
@@ -144,19 +150,20 @@ class DicomConverter:
                 f"expected magnitude and phase outputs for {plan.acquisition.label!r}; "
                 f"found {sorted(roles)}"
             )
-        cls._place_image(
-            roles["magnitude"],
-            plan,
-            dataset_root,
-            relative_prefix=Path(f"{plan.relative_prefix}_magnitude"),
-        )
-        cls._place_image(
-            roles["fieldmap"],
-            plan,
-            dataset_root,
-            relative_prefix=Path(f"{plan.relative_prefix}_fieldmap"),
-            metadata_updates={"Units": "Hz"},
-        )
+        placements = [
+            (roles["magnitude"], Path(f"{plan.relative_prefix}_magnitude"), None),
+            (roles["fieldmap"], Path(f"{plan.relative_prefix}_fieldmap"), {"Units": "Hz"}),
+        ]
+        for image, relative_prefix, _ in placements:
+            cls._require_new_image_outputs(image, relative_prefix, dataset_root)
+        for image, relative_prefix, metadata_updates in placements:
+            cls._place_image(
+                image,
+                plan,
+                dataset_root,
+                relative_prefix=relative_prefix,
+                metadata_updates=metadata_updates,
+            )
 
     @classmethod
     def _classify_fieldmap(cls, image: Path) -> str:
@@ -177,7 +184,9 @@ class DicomConverter:
         relative_prefix: Path | None = None,
         metadata_updates: dict[str, Any] | None = None,
     ) -> None:
-        destination_prefix = dataset_root / (relative_prefix or plan.relative_prefix)
+        destination_relative_prefix = relative_prefix or plan.relative_prefix
+        cls._require_new_image_outputs(image, destination_relative_prefix, dataset_root)
+        destination_prefix = dataset_root / destination_relative_prefix
         destination_prefix.parent.mkdir(parents=True, exist_ok=True)
         extension = ".nii.gz" if image.name.endswith(".nii.gz") else ".nii"
         try:
@@ -196,6 +205,24 @@ class DicomConverter:
                     shutil.copy2(source, destination_prefix.with_suffix(extension))
         except (OSError, TypeError, ValueError) as exc:
             raise ConversionError(f"could not place converted image {image.name!r}") from exc
+
+    @classmethod
+    def _require_new_image_outputs(
+        cls, image: Path, relative_prefix: Path, dataset_root: Path
+    ) -> None:
+        destination_prefix = dataset_root / relative_prefix
+        extension = ".nii.gz" if image.name.endswith(".nii.gz") else ".nii"
+        source_prefix = image.with_name(cls._source_stem(image))
+        destinations = [
+            Path(f"{destination_prefix}{extension}"),
+            destination_prefix.with_suffix(".json"),
+        ]
+        for companion_extension in (".bval", ".bvec"):
+            if source_prefix.with_suffix(companion_extension).exists():
+                destinations.append(destination_prefix.with_suffix(companion_extension))
+        for destination in destinations:
+            if destination.exists() or destination.is_symlink():
+                raise ConversionError(f"BIDS output already exists: {destination}")
 
     @classmethod
     def _read_metadata(cls, image: Path) -> dict[str, Any]:

@@ -1,5 +1,6 @@
 from pathlib import Path
 from subprocess import CalledProcessError
+import stat
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock
 import json
@@ -67,6 +68,13 @@ class TestDicomConverter(unittest.TestCase):
                 archive.writestr(name, content)
 
     @staticmethod
+    def write_symlink_zip(path: Path) -> None:
+        member = zipfile.ZipInfo("linked.dcm")
+        member.external_attr = (stat.S_IFLNK | 0o777) << 16
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(member, b"target.dcm")
+
+    @staticmethod
     def output_directory(command: list[str]) -> Path:
         return Path(command[command.index("-o") + 1])
 
@@ -101,6 +109,32 @@ class TestDicomConverter(unittest.TestCase):
             json.loads((self.destination / "dataset_description.json").read_text()),
             {"Name": "r01network export", "BIDSVersion": "1.10.1"},
         )
+
+    def test_invokes_dcm2niix_with_required_arguments(self) -> None:
+        self.converter.convert([self.functional_plan], self.destination, "r01network")
+
+        command = self.runner.call_args.args[0]
+        converted_directory = self.output_directory(command)
+        dicom_directory = Path(command[-1])
+        self.assertEqual(
+            command,
+            [
+                "dcm2niix",
+                "-b",
+                "y",
+                "-ba",
+                "y",
+                "-z",
+                "y",
+                "-f",
+                "converted",
+                "-o",
+                str(converted_directory),
+                str(dicom_directory),
+            ],
+        )
+        self.assertEqual(converted_directory.name, "converted")
+        self.assertEqual(dicom_directory.name, "dicoms")
 
     def test_places_fieldmap_outputs_and_units(self) -> None:
         def write_fieldmap_outputs(command: list[str], **kwargs) -> None:
@@ -138,6 +172,20 @@ class TestDicomConverter(unittest.TestCase):
             self.converter.convert([self.functional_plan], self.destination, "r01network")
         self.assertFalse(self.destination.exists())
 
+    def test_rejects_absolute_zip_path(self) -> None:
+        self.archive_writer = lambda path: self.write_zip(path, {"/escape.dcm": b"bad"})
+
+        with self.assertRaisesRegex(ConversionError, "unsafe path"):
+            self.converter.convert([self.functional_plan], self.destination, "r01network")
+        self.assertFalse(self.destination.exists())
+
+    def test_rejects_zip_symbolic_link(self) -> None:
+        self.archive_writer = self.write_symlink_zip
+
+        with self.assertRaisesRegex(ConversionError, "symbolic link"):
+            self.converter.convert([self.functional_plan], self.destination, "r01network")
+        self.assertFalse(self.destination.exists())
+
     def test_failure_leaves_no_destination(self) -> None:
         self.converter = DicomConverter(
             runner=Mock(side_effect=CalledProcessError(1, ["dcm2niix"]))
@@ -146,6 +194,27 @@ class TestDicomConverter(unittest.TestCase):
         with self.assertRaises(ConversionError):
             self.converter.convert([self.functional_plan], self.destination, "r01network")
 
+        self.assertFalse(self.destination.exists())
+
+    def test_wraps_failed_archive_download(self) -> None:
+        def fail_download(path: Path) -> None:
+            raise OSError("download failed")
+
+        self.archive_writer = fail_download
+
+        with self.assertRaises(ConversionError) as raised:
+            self.converter.convert([self.functional_plan], self.destination, "r01network")
+
+        self.assertIsInstance(raised.exception.__cause__, OSError)
+        self.assertFalse(self.destination.exists())
+
+    def test_wraps_missing_archive_download(self) -> None:
+        self.archive_writer = lambda path: None
+
+        with self.assertRaises(ConversionError) as raised:
+            self.converter.convert([self.functional_plan], self.destination, "r01network")
+
+        self.assertIsInstance(raised.exception.__cause__, FileNotFoundError)
         self.assertFalse(self.destination.exists())
 
     def test_rejects_missing_json_sidecar(self) -> None:
@@ -158,6 +227,21 @@ class TestDicomConverter(unittest.TestCase):
 
         with self.assertRaisesRegex(ConversionError, "JSON sidecar"):
             self.converter.convert([self.functional_plan], self.destination, "r01network")
+
+    def test_wraps_malformed_json_sidecar_with_its_cause(self) -> None:
+        def write_malformed_sidecar(command: list[str], **kwargs) -> None:
+            directory = self.output_directory(command)
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "converted.nii.gz").write_bytes(b"nifti")
+            (directory / "converted.json").write_text("{")
+
+        self.converter = DicomConverter(runner=write_malformed_sidecar)
+
+        with self.assertRaises(ConversionError) as raised:
+            self.converter.convert([self.functional_plan], self.destination, "r01network")
+
+        self.assertIsInstance(raised.exception.__cause__, json.JSONDecodeError)
+        self.assertFalse(self.destination.exists())
 
     def test_rejects_multiple_non_fieldmap_images(self) -> None:
         def write_two_images(command: list[str], **kwargs) -> None:
@@ -204,6 +288,30 @@ class TestDicomConverter(unittest.TestCase):
         with self.assertRaisesRegex(ConversionError, "already exists"):
             self.converter.convert([self.functional_plan], self.destination, "r01network")
         self.runner.assert_not_called()
+
+    def test_rejects_plans_with_colliding_staged_outputs(self) -> None:
+        def write_distinct_output(command: list[str], **kwargs) -> None:
+            self.write_output(
+                self.output_directory(command),
+                "converted",
+                {"call": self.runner.call_count},
+            )
+
+        self.runner = Mock(side_effect=write_distinct_output)
+        self.converter = DicomConverter(runner=self.runner)
+        duplicate = self.plan(
+            "func",
+            "sub-s03/ses-01/func/sub-s03_ses-01_task-flanker_run-1_bold",
+            task="flanker",
+        )
+
+        with self.assertRaisesRegex(ConversionError, "already exists"):
+            self.converter.convert(
+                [self.functional_plan, duplicate], self.destination, "r01network"
+            )
+
+        self.assertEqual(self.runner.call_count, 2)
+        self.assertFalse(self.destination.exists())
 
 
 if __name__ == "__main__":
