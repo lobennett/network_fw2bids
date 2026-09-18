@@ -11,3 +11,7 @@ wheels/
 
 # Local Flywheel credentials
 fw-api.txt
+.env
+
+# Local Git worktrees
+.worktrees/
