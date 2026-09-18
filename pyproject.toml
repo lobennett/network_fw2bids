@@ -9,6 +9,9 @@ dependencies = [
     "flywheel-sdk>=22.4.0",
 ]
 
+[project.scripts]
+network-fw2bids = "network_fw2bids.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
