@@ -20,5 +20,5 @@ build-backend = "hatchling.build"
 packages = ["src/network_fw2bids"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/tests", "/scripts", "/docs", "/README.md", "/pyproject.toml", "/uv.lock"]
+include = ["/src", "/tests", "/scripts", "/docs", "/README.md", "/final_sample_subjects.txt", "/pyproject.toml", "/uv.lock"]
 exclude = ["/.superpowers"]

@@ -13,9 +13,11 @@ class TestDistribution(unittest.TestCase):
         with TemporaryDirectory() as scratch:
             source = Path(scratch) / "source"
             source.mkdir()
-            for name in ("src", "tests", "scripts", "docs"):
+            for name in ("src", "tests", "scripts"):
                 shutil.copytree(project / name, source / name, ignore=shutil.ignore_patterns("__pycache__"))
-            for name in ("README.md", "pyproject.toml", "uv.lock"):
+            if (project / "docs").is_dir():
+                shutil.copytree(project / "docs", source / "docs")
+            for name in ("README.md", "pyproject.toml", "uv.lock", "final_sample_subjects.txt"):
                 shutil.copy2(project / name, source / name)
             workflow = source / ".superpowers/sdd"
             workflow.mkdir(parents=True)
@@ -39,7 +41,8 @@ class TestDistribution(unittest.TestCase):
                     "release archives must not contain local workflow artifacts",
                 )
             self.assertTrue({
-                "README.md", "pyproject.toml", "uv.lock", "scripts/test.py",
+                "README.md", "pyproject.toml", "uv.lock", "final_sample_subjects.txt",
+                "scripts/test.py", "scripts/submit_all_subjects.sh",
                 "src/network_fw2bids/api.py", "tests/test_conversion.py",
             }.issubset(source_files))
             self.assertIn("network_fw2bids/api.py", wheel_files)

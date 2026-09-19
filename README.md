@@ -70,6 +70,41 @@ The same CLI is available through Python:
 uv run python -m network_fw2bids --subject s03
 ```
 
+## Convert the final 46-subject sample on Sherlock
+
+[`final_sample_subjects.txt`](final_sample_subjects.txt) contains the five discovery
+subjects and 41 validation subjects in the locked final sample. The Sherlock launcher
+submits one array task per subject. Each task writes an isolated dataset under
+`<BIDS_DIR>.parts`; a dependent finalizer runs only after all 46 tasks succeed and
+atomically publishes the combined directory at `BIDS_DIR`.
+
+On a Sherlock login node, clone this repository on a shared filesystem and keep the
+Flywheel token in an ignored environment file. Then submit the workflow:
+
+```bash
+cd /path/to/network_fw2bids
+export BIDS_DIR="$SCRATCH/network_fw2bids/final/bids"
+export FLYWHEEL_ENV_FILE="$HOME/.config/network_fw2bids/.env"
+bash scripts/submit_all_subjects.sh
+```
+
+The launcher uses the `russpold,normal` partitions and at most three concurrent
+Flywheel downloads by default. Override these settings when needed:
+
+```bash
+PARTITION=normal THROTTLE=2 bash scripts/submit_all_subjects.sh
+```
+
+`BIDS_DIR` must be absolute and must not exist. The parts directory must be empty.
+Logs go to `<BIDS_DIR>.logs`, outside the BIDS dataset. Failed array tasks prevent the
+finalizer from running, and successful parts remain available for inspection. The
+launcher does not resume or overwrite earlier output; choose new paths or deliberately
+remove a failed run's parts before resubmitting.
+
+For a retry that preserves the failed run for inspection, keep `BIDS_DIR` unchanged and
+choose new `PARTS_DIR` and `LOG_DIR` values before submitting again. The three paths must
+be distinct and cannot contain one another.
+
 ## Library use
 
 The public library interface is `FlywheelBIDS`:
