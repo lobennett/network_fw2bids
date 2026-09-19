@@ -2,6 +2,9 @@ from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta
 from pathlib import Path
 import unittest
+from unittest.mock import Mock, patch
+
+from flywheel.rest import ApiException
 
 from network_fw2bids.errors import PlanningError
 from network_fw2bids.planning import ArchivePlan, SubjectPlanner
@@ -72,6 +75,29 @@ class TestSubjectPlanner(unittest.TestCase):
                 "sub-s03/ses-02/func/sub-s03_ses-02_task-flanker_run-1_bold",
             ],
         )
+
+    def test_rejects_unsafe_subject_labels_before_flywheel_lookup(self) -> None:
+        for label in ("../escaped", "/absolute", "s03/../../escaped", "s-03", "s_03", "", "é03"):
+            with self.subTest(label=label):
+                client = FakeClient(FakeProject([FakeSubject(label, [self.early_session])]))
+                with self.assertRaisesRegex(PlanningError, "subject label"):
+                    SubjectPlanner(client, self.project_path).plan(label)
+                self.assertEqual(client.lookups, [])
+
+    def test_wraps_sdk_lookup_and_traversal_failures(self) -> None:
+        subject = FakeSubject("s03", [self.early_session])
+        project = FakeProject([subject])
+        client = FakeClient(project)
+        for owner, attribute in (
+            (client, "lookup"), (project.subjects, "find_first"),
+            (subject, "sessions"), (self.early_session, "acquisitions"),
+        ):
+            with self.subTest(attribute=attribute):
+                failure = ApiException(status=403, reason="forbidden")
+                with patch.object(owner, attribute, Mock(side_effect=failure)):
+                    with self.assertRaises(PlanningError) as raised:
+                        SubjectPlanner(client, self.project_path).plan("s03")
+                self.assertIs(raised.exception.__cause__, failure)
 
     def test_reassigns_22752_from_s03_to_s10(self) -> None:
         reassigned = self.session(

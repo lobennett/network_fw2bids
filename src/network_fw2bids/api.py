@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 import flywheel
+from flywheel.rest import ApiException
 
 from .conversion import DicomConverter
+from .errors import PlanningError
 from .planning import ArchivePlan, SubjectPlanner
 
 
@@ -33,7 +35,11 @@ class FlywheelBIDS:
         project_path: str = DEFAULT_PROJECT,
         client_factory: Callable[[str], Any] = flywheel.Client,
     ) -> "FlywheelBIDS":
-        return cls(client_factory(token), project_path)
+        try:
+            client = client_factory(token)
+        except ApiException as exc:
+            raise PlanningError("could not authenticate with Flywheel") from exc
+        return cls(client, project_path)
 
     def plan_subject(self, subject_label: str) -> list[ArchivePlan]:
         return self._planner.plan(subject_label)

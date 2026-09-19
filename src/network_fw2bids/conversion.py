@@ -1,8 +1,7 @@
 """DICOM archive conversion and atomic BIDS dataset publication."""
 
 import json
-import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shutil
 import stat
 import subprocess
@@ -10,6 +9,9 @@ from tempfile import TemporaryDirectory
 from typing import Any, Callable, Sequence
 import zipfile
 
+from flywheel.rest import ApiException
+
+from ._publication import publish_directory
 from .errors import ConversionError
 from .planning import ArchivePlan
 
@@ -25,16 +27,30 @@ class DicomConverter:
         dataset_name: str,
     ) -> None:
         destination = Path(destination)
-        self._require_new_destination(destination)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        with TemporaryDirectory(prefix=".network-fw2bids-", dir=destination.parent) as scratch_name:
-            scratch = Path(scratch_name)
-            staged = scratch / "bids"
-            staged.mkdir()
-            self._write_dataset_description(staged, dataset_name)
-            for index, plan in enumerate(plans):
-                self._convert_archive(plan, staged, scratch / f"archive-{index}")
-            os.replace(staged, destination)
+        for plan in plans:
+            self._require_safe_relative_prefix(plan.relative_prefix)
+        try:
+            self._require_new_destination(destination)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with TemporaryDirectory(prefix=".network-fw2bids-", dir=destination.parent) as scratch_name:
+                scratch = Path(scratch_name)
+                staged = scratch / "bids"
+                staged.mkdir()
+                self._write_dataset_description(staged, dataset_name)
+                for index, plan in enumerate(plans):
+                    self._convert_archive(plan, staged, scratch / f"archive-{index}")
+                publish_directory(staged, destination)
+        except OSError as exc:
+            raise ConversionError(f"could not prepare or write BIDS dataset at {destination}") from exc
+
+    @classmethod
+    def _require_safe_relative_prefix(cls, relative_prefix: Path) -> None:
+        prefix = Path(relative_prefix)
+        if (
+            not prefix.parts or prefix.is_absolute() or ".." in prefix.parts
+            or PureWindowsPath(prefix).drive or "\\" in str(prefix) or "\0" in str(prefix)
+        ):
+            cls._raise_output_shape_error(f"unsafe BIDS output prefix: {relative_prefix!s}")
 
     @staticmethod
     def _require_new_destination(destination: Path) -> None:
@@ -79,7 +95,7 @@ class DicomConverter:
     def _download(plan: ArchivePlan, archive_path: Path) -> None:
         try:
             plan.acquisition.download_file(plan.dicom_file.name, str(archive_path))
-        except Exception as exc:
+        except (ApiException, OSError) as exc:
             raise ConversionError(
                 f"could not download DICOM archive for {plan.acquisition.label!r}"
             ) from exc
@@ -100,7 +116,7 @@ class DicomConverter:
                             f"unsafe path in DICOM archive: {member.filename!r}"
                         )
                 archive.extractall(destination)
-        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
             raise ConversionError(f"could not safely extract DICOM archive: {exc}") from exc
 
     def _run_dcm2niix(self, dicom_directory: Path, converted_directory: Path) -> None:
@@ -133,6 +149,8 @@ class DicomConverter:
                     f"expected one converted image for {plan.acquisition.label!r}, "
                     f"found {len(images)}"
                 )
+            if plan.modality == "dwi":
+                cls._require_dwi_gradients(images[0])
             cls._require_new_image_outputs(images[0], plan.relative_prefix, dataset_root)
             cls._place_image(images[0], plan, dataset_root)
             return
@@ -169,8 +187,16 @@ class DicomConverter:
     def _classify_fieldmap(cls, image: Path) -> str:
         source_stem = cls._source_stem(image)
         metadata = cls._read_metadata(image)
-        image_type = {str(value).upper() for value in metadata.get("ImageType", [])}
-        component = str(metadata.get("ComplexImageComponent", "")).upper()
+        image_type = metadata.get("ImageType", [])
+        component = metadata.get("ComplexImageComponent", "")
+        if (
+            not isinstance(image_type, list)
+            or any(not isinstance(value, str) for value in image_type)
+            or not isinstance(component, str)
+        ):
+            cls._raise_output_shape_error(f"invalid fieldmap metadata in {image.name!r}")
+        image_type = {value.upper() for value in image_type}
+        component = component.upper()
         if source_stem.lower().endswith("_ph") or "P" in image_type or component == "PHASE":
             return "fieldmap"
         return "magnitude"
@@ -210,6 +236,7 @@ class DicomConverter:
     def _require_new_image_outputs(
         cls, image: Path, relative_prefix: Path, dataset_root: Path
     ) -> None:
+        cls._require_safe_relative_prefix(relative_prefix)
         destination_prefix = dataset_root / relative_prefix
         extension = ".nii.gz" if image.name.endswith(".nii.gz") else ".nii"
         source_prefix = image.with_name(cls._source_stem(image))
@@ -221,8 +248,25 @@ class DicomConverter:
             if source_prefix.with_suffix(companion_extension).exists():
                 destinations.append(destination_prefix.with_suffix(companion_extension))
         for destination in destinations:
+            if not destination.resolve().is_relative_to(dataset_root.resolve()):
+                cls._raise_output_shape_error(
+                    f"BIDS output resolves outside the staging directory: {destination}"
+                )
             if destination.exists() or destination.is_symlink():
                 raise ConversionError(f"BIDS output already exists: {destination}")
+
+    @classmethod
+    def _require_dwi_gradients(cls, image: Path) -> None:
+        prefix = image.with_name(cls._source_stem(image))
+        for extension in (".bval", ".bvec"):
+            companion = prefix.with_suffix(extension)
+            try:
+                if not companion.is_file() or not companion.read_bytes().strip():
+                    cls._raise_output_shape_error(
+                        f"dcm2niix did not produce a usable DWI gradient companion: {companion.name}"
+                    )
+            except OSError as exc:
+                raise ConversionError(f"could not read DWI gradient companion: {companion.name}") from exc
 
     @classmethod
     def _read_metadata(cls, image: Path) -> dict[str, Any]:

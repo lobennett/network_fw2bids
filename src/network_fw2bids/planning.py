@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
+
+from flywheel.rest import ApiException
 
 from .errors import PlanningError
 from . import rules
@@ -21,17 +24,22 @@ class SubjectPlanner:
         self._project_path = project_path
 
     def plan(self, subject_label: str) -> list[ArchivePlan]:
-        project = self._client.lookup(self._project_path)
-        if project is None:
-            raise PlanningError(
-                f"Flywheel project {self._project_path!r} was not found"
-            )
+        if not re.fullmatch(r"[A-Za-z0-9]+", subject_label):
+            raise PlanningError("BIDS subject label must contain only ASCII letters and digits")
         if subject_label == "n01":
             raise PlanningError("pilot subject n01 uses an unsupported naming convention")
 
-        sessions = self._canonical_sessions(project, subject_label)
-        session_numbers = self._number_sessions(sessions, subject_label)
-        return self._build_plans(subject_label, sessions, session_numbers)
+        try:
+            project = self._client.lookup(self._project_path)
+            if project is None:
+                raise PlanningError(
+                    f"Flywheel project {self._project_path!r} was not found"
+                )
+            sessions = self._canonical_sessions(project, subject_label)
+            session_numbers = self._number_sessions(sessions, subject_label)
+            return self._build_plans(subject_label, sessions, session_numbers)
+        except ApiException as exc:
+            raise PlanningError(f"could not read Flywheel project {self._project_path!r}") from exc
 
     def _canonical_sessions(self, project: Any, subject_label: str) -> list[Any]:
         sessions: list[Any] = []

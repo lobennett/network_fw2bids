@@ -2,7 +2,7 @@ from pathlib import Path
 from subprocess import CalledProcessError
 import stat
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import json
 import unittest
 import zipfile
@@ -164,6 +164,164 @@ class TestDicomConverter(unittest.TestCase):
         prefix = self.destination / self.dwi_plan.relative_prefix
         self.assertEqual(prefix.with_suffix(".bval").read_bytes(), b"0 1000")
         self.assertEqual(prefix.with_suffix(".bvec").read_bytes(), b"1 0 0")
+
+    def test_rejects_each_missing_dwi_gradient_combination(self) -> None:
+        for missing in ((".bval",), (".bvec",), (".bval", ".bvec")):
+            with self.subTest(missing=missing):
+                def write_incomplete_dwi(command: list[str], **kwargs) -> None:
+                    self.write_output(
+                        self.output_directory(command),
+                        "converted",
+                        companions={
+                            extension: b"0 1000"
+                            for extension in (".bval", ".bvec")
+                            if extension not in missing
+                        },
+                    )
+
+                destination = self.root / ("missing" + "".join(missing))
+                with self.assertRaisesRegex(ConversionError, "gradient"):
+                    DicomConverter(write_incomplete_dwi).convert(
+                        [self.dwi_plan], destination, "r01network"
+                    )
+                self.assertFalse(destination.exists())
+
+    def test_rejects_unusable_dwi_gradients(self) -> None:
+        for extension in (".bval", ".bvec"):
+            for invalid in (b"", b" \n", "directory"):
+                with self.subTest(extension=extension, invalid=invalid):
+                    def write_unusable_dwi(command: list[str], **kwargs) -> None:
+                        directory = self.output_directory(command)
+                        self.write_output(directory, "converted")
+                        for companion in (".bval", ".bvec"):
+                            path = directory / f"converted{companion}"
+                            if companion == extension and invalid == "directory":
+                                path.mkdir()
+                            else:
+                                path.write_bytes(invalid if companion == extension else b"0 1")
+
+                    destination = self.root / f"unusable-{extension}-{invalid!r}"
+                    with self.assertRaisesRegex(ConversionError, "gradient"):
+                        DicomConverter(write_unusable_dwi).convert(
+                            [self.dwi_plan], destination, "r01network"
+                        )
+                    self.assertFalse(destination.exists())
+
+    def test_rejects_all_unsafe_plan_prefixes_before_download_or_write(self) -> None:
+        prefixes = (
+            self.root / "escaped/scan", Path("../../escaped/scan"),
+            Path("sub-s03/../scan"), Path("."), Path("C:/escaped/scan"),
+            Path(r"..\escaped\scan"), Path("scan\0suffix"),
+        )
+        for prefix in prefixes:
+            for modality in ("func", "fmap"):
+                with self.subTest(prefix=prefix, modality=modality):
+                    self.archive_writer = Mock()
+                    destination = self.root / "new-parent/bids"
+                    unsafe = self.plan(modality, str(prefix))
+                    with self.assertRaisesRegex(ConversionError, "unsafe.*prefix"):
+                        self.converter.convert(
+                            [self.functional_plan, unsafe], destination, "r01network"
+                        )
+                    self.archive_writer.assert_not_called()
+                    self.runner.assert_not_called()
+                    self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_rejects_ordinary_and_fieldmap_outputs_resolving_outside_staging(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        for plan in (self.functional_plan, self.fieldmap_plan):
+            with self.subTest(modality=plan.modality):
+                def write_outputs_and_redirect_subject(command: list[str], **kwargs) -> None:
+                    directory = self.output_directory(command)
+                    staged = directory.parent.parent / "bids"
+                    (staged / "sub-s03").symlink_to(outside, target_is_directory=True)
+                    self.write_output(directory, "converted_mag")
+                    if plan.modality == "fmap":
+                        self.write_output(directory, "converted_ph", {"ImageType": ["P"]})
+
+                with self.assertRaisesRegex(ConversionError, "outside.*staging"):
+                    DicomConverter(write_outputs_and_redirect_subject).convert(
+                        [plan], self.root / plan.modality, "r01network"
+                    )
+                self.assertEqual(list(outside.iterdir()), [])
+                self.assertFalse((self.root / plan.modality).exists())
+
+    def test_publication_preserves_destination_created_during_conversion(self) -> None:
+        created = []
+
+        def write_output_and_create_destination(command: list[str], **kwargs) -> None:
+            self.write_functional_output(command, **kwargs)
+            self.destination.mkdir(mode=0o700)
+            created.append(self.destination.stat())
+
+        real_exists = Path.exists
+
+        def stale_exists(path: Path) -> bool:
+            # A userspace existence check can miss a concurrent mkdir.
+            return False if path == self.destination else real_exists(path)
+
+        with patch.object(Path, "exists", stale_exists):
+            with self.assertRaises(ConversionError) as raised:
+                DicomConverter(write_output_and_create_destination).convert(
+                    [self.functional_plan], self.destination, "r01network"
+                )
+
+        self.assertIsInstance(raised.exception.__cause__, FileExistsError)
+        self.assertEqual(self.destination.stat().st_ino, created[0].st_ino)
+        self.assertEqual(self.destination.stat().st_mode, created[0].st_mode)
+        self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_wraps_encrypted_zip_failure(self) -> None:
+        def write_encrypted_zip(path: Path) -> None:
+            self.write_zip(path, {"scan.dcm": b"dicom"})
+            data = bytearray(path.read_bytes())
+            data[6] |= 1  # Encryption flag in the local header.
+            data[data.index(b"PK\x01\x02") + 8] |= 1  # Central directory flag.
+            path.write_bytes(data)
+
+        self.archive_writer = write_encrypted_zip
+        with self.assertRaises(ConversionError) as raised:
+            self.converter.convert([self.functional_plan], self.destination, "r01network")
+        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+        self.assertFalse(self.destination.exists())
+
+    def test_rejects_malformed_fieldmap_metadata(self) -> None:
+        for metadata in (
+            {"ImageType": None}, {"ImageType": "P"}, {"ImageType": [None]},
+            {"ComplexImageComponent": None}, {"ComplexImageComponent": ["PHASE"]},
+        ):
+            with self.subTest(metadata=metadata):
+                def write_invalid_metadata(command: list[str], **kwargs) -> None:
+                    directory = self.output_directory(command)
+                    self.write_output(directory, "converted_mag")
+                    self.write_output(directory, "converted_ph", metadata)
+
+                destination = self.root / str(len(list(self.root.iterdir())))
+                with self.assertRaisesRegex(ConversionError, "fieldmap metadata") as raised:
+                    DicomConverter(write_invalid_metadata).convert(
+                        [self.fieldmap_plan], destination, "r01network"
+                    )
+                self.assertIsInstance(raised.exception.__cause__, ValueError)
+                self.assertFalse(destination.exists())
+
+    def test_wraps_output_parent_that_is_a_file(self) -> None:
+        parent = self.root / "file"
+        parent.write_text("keep me")
+        self.archive_writer = Mock()
+        with self.assertRaises(ConversionError) as raised:
+            self.converter.convert([self.functional_plan], parent / "bids", "r01network")
+        self.assertIsInstance(raised.exception.__cause__, FileExistsError)
+        self.assertEqual(parent.read_text(), "keep me")
+        self.archive_writer.assert_not_called()
+
+    def test_does_not_hide_programming_errors_in_download(self) -> None:
+        defect = TypeError("incorrect download implementation")
+        self.archive_writer = Mock(side_effect=defect)
+        with self.assertRaises(TypeError) as raised:
+            self.converter.convert([self.functional_plan], self.destination, "r01network")
+        self.assertIs(raised.exception, defect)
+        self.assertFalse(self.destination.exists())
 
     def test_rejects_zip_path_traversal(self) -> None:
         self.archive_writer = lambda path: self.write_zip(path, {"../escape.dcm": b"bad"})

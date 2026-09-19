@@ -1,9 +1,14 @@
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock
+import zipfile
+
+from flywheel.rest import ApiException
 
 from network_fw2bids import ArchivePlan, FlywheelBIDS, NetworkFW2BIDSError
+from network_fw2bids.errors import ConversionError, PlanningError
 from tests.fakes import FakeAcquisition, FakeClient, FakeFile, FakeProject, FakeSession, FakeSubject
 
 
@@ -52,6 +57,39 @@ class TestFlywheelBIDS(unittest.TestCase):
 
         self.assertIsInstance(instance, FlywheelBIDS)
         self.assertEqual(clients, ["token"])
+
+    def test_from_token_wraps_sdk_authentication_failure(self) -> None:
+        failure = ApiException(status=401, reason="unauthorized")
+        with self.assertRaises(PlanningError) as raised:
+            FlywheelBIDS.from_token("token", client_factory=Mock(side_effect=failure))
+        self.assertIs(raised.exception.__cause__, failure)
+
+    def test_supplied_plan_paths_cannot_escape_the_staged_dataset(self) -> None:
+        for kind in ("absolute", "parent"):
+            with self.subTest(kind=kind), TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                downloads = []
+
+                def download(name: str, destination: str) -> None:
+                    downloads.append(name)
+                    with zipfile.ZipFile(destination, "w") as archive:
+                        archive.writestr("scan.dcm", b"dicom")
+
+                def runner(command: list[str], **kwargs) -> None:
+                    directory = Path(command[command.index("-o") + 1])
+                    (directory / "converted.nii.gz").write_bytes(b"nifti")
+                    (directory / "converted.json").write_text("{}")
+
+                prefix = root / "escaped/scan" if kind == "absolute" else Path("../../escaped/scan")
+                plan = ArchivePlan(
+                    acquisition=Mock(label="test", download_file=download),
+                    dicom_file=FakeFile(), relative_prefix=prefix, modality="func",
+                )
+                instance = FlywheelBIDS(FakeClient(None), runner=runner)
+                with self.assertRaisesRegex(ConversionError, "unsafe.*prefix"):
+                    instance.convert_subject("s03", root / "bids", plans=[plan])
+                self.assertEqual(downloads, [])
+                self.assertEqual(list(root.iterdir()), [])
 
     def test_convert_reuses_supplied_plan_without_planning(self) -> None:
         client = FakeClient(None)

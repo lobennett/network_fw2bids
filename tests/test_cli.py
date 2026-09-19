@@ -1,13 +1,19 @@
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
 from io import StringIO
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from flywheel.rest import ApiException
+
+from network_fw2bids import FlywheelBIDS
 from network_fw2bids.cli import main
 from network_fw2bids.errors import PlanningError
+from tests.fakes import FakeAcquisition, FakeClient, FakeProject, FakeSession, FakeSubject
 
 
 class FakeFlywheelBIDS:
@@ -98,6 +104,56 @@ class TestCommandLine(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("Flywheel subject 's03' was not found", error.getvalue())
         self.assertNotIn("Traceback", error.getvalue())
+
+    def test_sdk_failures_are_reported_without_a_traceback(self) -> None:
+        for boundary in ("authentication", "lookup", "sessions"):
+            with self.subTest(boundary=boundary):
+                subject = FakeSubject("s03", [])
+                client = FakeClient(FakeProject([subject]))
+                failure = ApiException(status=401, reason="unauthorized")
+                client_factory = Mock(return_value=client)
+                if boundary == "authentication":
+                    client_factory.side_effect = failure
+                elif boundary == "lookup":
+                    client.lookup = Mock(side_effect=failure)
+                else:
+                    subject.sessions = Mock(side_effect=failure)
+
+                def factory(token: str, **kwargs) -> FlywheelBIDS:
+                    return FlywheelBIDS.from_token(token, client_factory=client_factory, **kwargs)
+
+                error = StringIO()
+                with (
+                    patch.dict(os.environ, {"FLYWHEEL_API_TOKEN": "test-token"}),
+                    redirect_stderr(error), redirect_stdout(StringIO()),
+                ):
+                    result = main(["--subject", "s03"], factory=factory)
+                self.assertEqual(result, 1)
+                self.assertIn("error:", error.getvalue())
+                self.assertNotIn("Traceback", error.getvalue())
+
+    def test_filesystem_failure_is_reported_without_a_traceback(self) -> None:
+        now = datetime(2026, 1, 1)
+        acquisition = FakeAcquisition("task-flanker_bold", now)
+        client = FakeClient(FakeProject([
+            FakeSubject("s03", [FakeSession("100", now, [acquisition])]),
+        ]))
+        with TemporaryDirectory() as scratch:
+            parent = Path(scratch) / "file"
+            parent.write_text("keep me")
+            error = StringIO()
+            with (
+                patch.dict(os.environ, {"FLYWHEEL_API_TOKEN": "test-token"}),
+                redirect_stderr(error), redirect_stdout(StringIO()),
+            ):
+                result = main(
+                    ["--subject", "s03", "--execute", "--output", str(parent / "bids")],
+                    factory=lambda *args, **kwargs: FlywheelBIDS(client),
+                )
+            self.assertEqual(result, 1)
+            self.assertIn("error:", error.getvalue())
+            self.assertNotIn("Traceback", error.getvalue())
+            self.assertEqual(parent.read_text(), "keep me")
 
 
 if __name__ == "__main__":

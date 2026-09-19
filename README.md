@@ -58,6 +58,12 @@ subject in a temporary directory and publishes it only after every archive
 succeeds. A failed conversion does not publish a partial dataset at the
 requested output path.
 
+Atomic publication requires macOS or Linux with filesystem support for an
+exclusive rename (`renamex_np` with `RENAME_EXCL` on macOS, `renameat2` with
+`RENAME_NOREPLACE` on Linux). Conversion fails if that operation is unavailable
+or if the output appears during conversion; it never replaces that path.
+Diffusion conversions require readable, nonempty `.bval` and `.bvec` files.
+
 The same CLI is available through Python:
 
 ```bash
