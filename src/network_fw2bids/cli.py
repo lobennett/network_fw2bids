@@ -5,8 +5,9 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from .api import FlywheelBIDS
-from .errors import NetworkFW2BIDSError
+from .api import FlywheelBIDS, _require_pinned_deface_config
+from .defacing import DefaceConfig
+from .errors import DefacingError, NetworkFW2BIDSError
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -23,6 +24,9 @@ def get_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="download and convert; without this flag, only print the plan",
     )
+    parser.add_argument("--pydeface-image", type=Path, metavar="PATH")
+    parser.add_argument("--pydeface-version", metavar="VERSION")
+    parser.add_argument("--pydeface-sha256", metavar="SHA256")
     return parser
 
 
@@ -34,11 +38,29 @@ def main(
     args = parser.parse_args(argv)
     if args.execute and args.output is None:
         parser.error("--execute requires --output")
+    config: DefaceConfig | None = None
+    values = (args.pydeface_image, args.pydeface_version, args.pydeface_sha256)
+    if args.execute:
+        if not all(values):
+            parser.error(
+                "--execute requires --pydeface-image, --pydeface-version, and --pydeface-sha256"
+            )
+        config = DefaceConfig(
+            image=args.pydeface_image,
+            version=args.pydeface_version,
+            sha256=args.pydeface_sha256,
+        )
+        try:
+            _require_pinned_deface_config(config)
+        except DefacingError as exc:
+            parser.error(str(exc))
+    elif any(value is not None for value in values):
+        parser.error("PyDeface options require --execute")
     token = os.environ.get("FLYWHEEL_API_TOKEN")
     if not token:
         raise SystemExit("FLYWHEEL_API_TOKEN is not set")
     try:
-        converter = factory(token, project_path=args.project)
+        converter = factory(token, project_path=args.project, deface_config=config)
         plans = converter.plan_subject(args.subject)
         for plan in plans:
             print(f"{plan.acquisition.label}: {plan.dicom_file.name} -> {plan.relative_prefix}")

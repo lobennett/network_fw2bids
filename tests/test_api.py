@@ -8,7 +8,8 @@ import zipfile
 from flywheel.rest import ApiException
 
 from network_fw2bids import ArchivePlan, FlywheelBIDS, NetworkFW2BIDSError
-from network_fw2bids.errors import ConversionError, PlanningError
+from network_fw2bids.defacing import DefaceConfig
+from network_fw2bids.errors import ConversionError, DefacingError, PlanningError
 from tests.fakes import FakeAcquisition, FakeClient, FakeFile, FakeProject, FakeSession, FakeSubject
 
 
@@ -63,6 +64,17 @@ class TestFlywheelBIDS(unittest.TestCase):
         with self.assertRaises(PlanningError) as raised:
             FlywheelBIDS.from_token("token", client_factory=Mock(side_effect=failure))
         self.assertIs(raised.exception.__cause__, failure)
+
+    def test_from_token_rejects_unpinned_defacing_config_before_authentication(self) -> None:
+        client_factory = Mock()
+        config = DefaceConfig(Path("relative-pydeface.sif"), "2.1.0", "0" * 64)
+
+        with self.assertRaisesRegex(DefacingError, "absolute"):
+            FlywheelBIDS.from_token(
+                "token", deface_config=config, client_factory=client_factory
+            )
+
+        client_factory.assert_not_called()
 
     def test_supplied_plan_paths_cannot_escape_the_staged_dataset(self) -> None:
         for kind in ("absolute", "parent"):

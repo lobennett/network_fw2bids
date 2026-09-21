@@ -12,13 +12,20 @@ import zipfile
 from flywheel.rest import ApiException
 
 from ._publication import publish_directory
-from .errors import ConversionError
+from .defacing import DefaceConfig, DefacingReceipt, load_receipt, receipt_path, write_receipt_atomic
+from .errors import ConversionError, DefacingError
 from .planning import ArchivePlan
+from .sensitive_workspace import sensitive_workspace
 
 
 class DicomConverter:
-    def __init__(self, runner: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> None:
+    def __init__(
+        self,
+        runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+        deface_config: DefaceConfig | None = None,
+    ) -> None:
         self._runner = runner
+        self._deface_config = deface_config
 
     def convert(
         self,
@@ -29,19 +36,89 @@ class DicomConverter:
         destination = Path(destination)
         for plan in plans:
             self._require_safe_relative_prefix(plan.relative_prefix)
+        subject = self._subject_from_plans(plans)
+        if self._deface_config is None:
+            raise ConversionError("PyDeface configuration is required for conversion")
         try:
             self._require_new_destination(destination)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            with TemporaryDirectory(prefix=".network-fw2bids-", dir=destination.parent) as scratch_name:
-                scratch = Path(scratch_name)
-                staged = scratch / "bids"
-                staged.mkdir()
-                self._write_dataset_description(staged, dataset_name)
-                for index, plan in enumerate(plans):
-                    self._convert_archive(plan, staged, scratch / f"archive-{index}")
-                publish_directory(staged, destination)
+            with TemporaryDirectory(
+                prefix=".network-fw2bids-safe-", dir=destination.parent
+            ) as safe_name:
+                safe_stage = Path(safe_name) / "bids"
+                with sensitive_workspace() as sensitive:
+                    staged = sensitive / "bids"
+                    staged.mkdir()
+                    self._write_dataset_description(staged, dataset_name)
+                    for index, plan in enumerate(plans):
+                        self._convert_archive(plan, staged, sensitive / f"archive-{index}")
+                    from .defacing import deface_dataset
+
+                    receipt = deface_dataset(staged, subject, self._deface_config, self._runner)
+                    write_receipt_atomic(staged, receipt)
+                    shutil.copytree(staged, safe_stage, symlinks=False)
+                    self._verify_safe_copy(safe_stage, receipt)
+                publish_directory(safe_stage, destination)
         except OSError as exc:
             raise ConversionError(f"could not prepare or write BIDS dataset at {destination}") from exc
+
+    @staticmethod
+    def _subject_from_plans(plans: Sequence[ArchivePlan]) -> str:
+        subjects: set[str] = set()
+        for plan in plans:
+            parts = Path(plan.relative_prefix).parts
+            if not parts or not parts[0].startswith("sub-"):
+                raise ConversionError(f"could not determine subject from BIDS prefix: {plan.relative_prefix}")
+            subject = parts[0].removeprefix("sub-")
+            if not subject or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" for character in subject):
+                raise ConversionError(f"could not determine subject from BIDS prefix: {plan.relative_prefix}")
+            subjects.add(subject)
+        if len(subjects) != 1:
+            raise ConversionError("conversion plans must contain exactly one subject")
+        return subjects.pop()
+
+    @classmethod
+    def _verify_safe_copy(cls, dataset_root: Path, expected: DefacingReceipt) -> None:
+        try:
+            if dataset_root.is_symlink() or not dataset_root.is_dir():
+                raise ConversionError("safe publication staging is missing or unsafe")
+            for path in dataset_root.rglob("*"):
+                if path.is_symlink():
+                    raise ConversionError("safe publication staging contains a symbolic link")
+            copied = load_receipt(receipt_path(dataset_root, expected.subject))
+            if copied != expected:
+                raise ConversionError("safe publication receipt does not match defacing evidence")
+            anatomy: set[str] = set()
+            for path in dataset_root.rglob("*"):
+                if path.parent.name != "anat" or not path.name.endswith(("_T1w.nii", "_T1w.nii.gz", "_T2w.nii", "_T2w.nii.gz")):
+                    continue
+                if not path.is_file():
+                    raise ConversionError("safe publication staging contains unsafe anatomy")
+                relative = path.relative_to(dataset_root).as_posix()
+                anatomy.add(relative)
+                record = next((item for item in copied.images if item.path == relative), None)
+                if record is None or cls._sha256(path) != record.output_sha256:
+                    raise ConversionError("safe publication checksum does not match defacing receipt")
+                sidecar = path.with_name(path.name[:-7] + ".json") if path.name.endswith(".nii.gz") else path.with_suffix(".json")
+                metadata = json.loads(sidecar.read_text())
+                if not isinstance(metadata, dict) or metadata.get("Defaced") is not True:
+                    raise ConversionError("safe publication anatomy is missing defacing metadata")
+            if anatomy != {item.path for item in copied.images}:
+                raise ConversionError("safe publication anatomy does not match defacing receipt")
+        except (OSError, ValueError, json.JSONDecodeError, DefacingError) as exc:
+            if isinstance(exc, ConversionError):
+                raise
+            raise ConversionError("could not verify safe publication staging") from exc
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        import hashlib
+
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
 
     @classmethod
     def _require_safe_relative_prefix(cls, relative_prefix: Path) -> None:

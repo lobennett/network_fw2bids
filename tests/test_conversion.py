@@ -1,6 +1,8 @@
 from pathlib import Path
 from subprocess import CalledProcessError
 import stat
+import hashlib
+import os
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 import json
@@ -8,6 +10,7 @@ import unittest
 import zipfile
 
 from network_fw2bids.conversion import DicomConverter
+from network_fw2bids.defacing import DefaceConfig
 from network_fw2bids.errors import ConversionError
 from network_fw2bids.planning import ArchivePlan
 
@@ -32,10 +35,22 @@ class TestDicomConverter(unittest.TestCase):
         self.temporary_directory = TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.root = Path(self.temporary_directory.name)
+        self.node_tmp = self.root / "node-tmp"
+        self.node_tmp.mkdir()
+        self.environment = patch.dict(os.environ, {"SLURM_TMPDIR": str(self.node_tmp)})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        image = self.root / "pydeface.sif"
+        image.write_bytes(b"pinned test image")
+        self.deface_config = DefaceConfig(
+            image=image,
+            version="2.1.0",
+            sha256=hashlib.sha256(image.read_bytes()).hexdigest(),
+        )
         self.destination = self.root / "bids"
         self.archive_writer = lambda path: self.write_zip(path, {"scan.dcm": b"dicom"})
         self.runner = Mock(side_effect=self.write_functional_output)
-        self.converter = DicomConverter(runner=self.runner)
+        self.converter = DicomConverter(runner=self.runner, deface_config=self.deface_config)
         self.functional_plan = self.plan(
             "func",
             "sub-s03/ses-01/func/sub-s03_ses-01_task-flanker_run-1_bold",
@@ -142,7 +157,7 @@ class TestDicomConverter(unittest.TestCase):
             self.write_output(directory, "converted_mag")
             self.write_output(directory, "converted_ph", {"ComplexImageComponent": "PHASE"})
 
-        self.converter = DicomConverter(runner=write_fieldmap_outputs)
+        self.converter = DicomConverter(runner=write_fieldmap_outputs, deface_config=self.deface_config)
         self.converter.convert([self.fieldmap_plan], self.destination, "r01network")
 
         fieldmap = self.destination / "sub-s03/ses-01/fmap/sub-s03_ses-01_run-1_fieldmap.json"
@@ -158,7 +173,7 @@ class TestDicomConverter(unittest.TestCase):
                 companions={".bval": b"0 1000", ".bvec": b"1 0 0"},
             )
 
-        self.converter = DicomConverter(runner=write_dwi_output)
+        self.converter = DicomConverter(runner=write_dwi_output, deface_config=self.deface_config)
         self.converter.convert([self.dwi_plan], self.destination, "r01network")
 
         prefix = self.destination / self.dwi_plan.relative_prefix
@@ -181,7 +196,7 @@ class TestDicomConverter(unittest.TestCase):
 
                 destination = self.root / ("missing" + "".join(missing))
                 with self.assertRaisesRegex(ConversionError, "gradient"):
-                    DicomConverter(write_incomplete_dwi).convert(
+                    DicomConverter(write_incomplete_dwi, self.deface_config).convert(
                         [self.dwi_plan], destination, "r01network"
                     )
                 self.assertFalse(destination.exists())
@@ -202,7 +217,7 @@ class TestDicomConverter(unittest.TestCase):
 
                     destination = self.root / f"unusable-{extension}-{invalid!r}"
                     with self.assertRaisesRegex(ConversionError, "gradient"):
-                        DicomConverter(write_unusable_dwi).convert(
+                        DicomConverter(write_unusable_dwi, self.deface_config).convert(
                             [self.dwi_plan], destination, "r01network"
                         )
                     self.assertFalse(destination.exists())
@@ -225,7 +240,7 @@ class TestDicomConverter(unittest.TestCase):
                         )
                     self.archive_writer.assert_not_called()
                     self.runner.assert_not_called()
-                    self.assertEqual(list(self.root.iterdir()), [])
+                    self.assertFalse((self.root / "new-parent").exists())
 
     def test_rejects_ordinary_and_fieldmap_outputs_resolving_outside_staging(self) -> None:
         outside = self.root / "outside"
@@ -241,7 +256,7 @@ class TestDicomConverter(unittest.TestCase):
                         self.write_output(directory, "converted_ph", {"ImageType": ["P"]})
 
                 with self.assertRaisesRegex(ConversionError, "outside.*staging"):
-                    DicomConverter(write_outputs_and_redirect_subject).convert(
+                    DicomConverter(write_outputs_and_redirect_subject, self.deface_config).convert(
                         [plan], self.root / plan.modality, "r01network"
                     )
                 self.assertEqual(list(outside.iterdir()), [])
@@ -263,7 +278,7 @@ class TestDicomConverter(unittest.TestCase):
 
         with patch.object(Path, "exists", stale_exists):
             with self.assertRaises(ConversionError) as raised:
-                DicomConverter(write_output_and_create_destination).convert(
+                DicomConverter(write_output_and_create_destination, self.deface_config).convert(
                     [self.functional_plan], self.destination, "r01network"
                 )
 
@@ -299,7 +314,7 @@ class TestDicomConverter(unittest.TestCase):
 
                 destination = self.root / str(len(list(self.root.iterdir())))
                 with self.assertRaisesRegex(ConversionError, "fieldmap metadata") as raised:
-                    DicomConverter(write_invalid_metadata).convert(
+                    DicomConverter(write_invalid_metadata, self.deface_config).convert(
                         [self.fieldmap_plan], destination, "r01network"
                     )
                 self.assertIsInstance(raised.exception.__cause__, ValueError)
@@ -346,7 +361,8 @@ class TestDicomConverter(unittest.TestCase):
 
     def test_failure_leaves_no_destination(self) -> None:
         self.converter = DicomConverter(
-            runner=Mock(side_effect=CalledProcessError(1, ["dcm2niix"]))
+            runner=Mock(side_effect=CalledProcessError(1, ["dcm2niix"])),
+            deface_config=self.deface_config,
         )
 
         with self.assertRaises(ConversionError):
@@ -381,7 +397,7 @@ class TestDicomConverter(unittest.TestCase):
             directory.mkdir(parents=True, exist_ok=True)
             (directory / "converted.nii.gz").write_bytes(b"nifti")
 
-        self.converter = DicomConverter(runner=write_image_without_sidecar)
+        self.converter = DicomConverter(runner=write_image_without_sidecar, deface_config=self.deface_config)
 
         with self.assertRaisesRegex(ConversionError, "JSON sidecar"):
             self.converter.convert([self.functional_plan], self.destination, "r01network")
@@ -393,7 +409,7 @@ class TestDicomConverter(unittest.TestCase):
             (directory / "converted.nii.gz").write_bytes(b"nifti")
             (directory / "converted.json").write_text("{")
 
-        self.converter = DicomConverter(runner=write_malformed_sidecar)
+        self.converter = DicomConverter(runner=write_malformed_sidecar, deface_config=self.deface_config)
 
         with self.assertRaises(ConversionError) as raised:
             self.converter.convert([self.functional_plan], self.destination, "r01network")
@@ -407,7 +423,7 @@ class TestDicomConverter(unittest.TestCase):
             self.write_output(directory, "first")
             self.write_output(directory, "second")
 
-        self.converter = DicomConverter(runner=write_two_images)
+        self.converter = DicomConverter(runner=write_two_images, deface_config=self.deface_config)
 
         with self.assertRaisesRegex(ConversionError, "expected one converted image"):
             self.converter.convert([self.functional_plan], self.destination, "r01network")
@@ -421,7 +437,7 @@ class TestDicomConverter(unittest.TestCase):
                 def write_one_image(command: list[str], **kwargs) -> None:
                     self.write_output(self.output_directory(command), stem, metadata)
 
-                self.converter = DicomConverter(runner=write_one_image)
+                self.converter = DicomConverter(runner=write_one_image, deface_config=self.deface_config)
 
                 with self.assertRaisesRegex(ConversionError, "magnitude and phase"):
                     self.converter.convert(
@@ -435,7 +451,7 @@ class TestDicomConverter(unittest.TestCase):
             self.write_output(directory, "second")
             self.write_output(directory, "phase_ph", {"ImageType": ["P"]})
 
-        self.converter = DicomConverter(runner=write_duplicate_magnitudes)
+        self.converter = DicomConverter(runner=write_duplicate_magnitudes, deface_config=self.deface_config)
 
         with self.assertRaisesRegex(ConversionError, "multiple magnitude"):
             self.converter.convert([self.fieldmap_plan], self.destination, "r01network")
@@ -456,7 +472,7 @@ class TestDicomConverter(unittest.TestCase):
             )
 
         self.runner = Mock(side_effect=write_distinct_output)
-        self.converter = DicomConverter(runner=self.runner)
+        self.converter = DicomConverter(runner=self.runner, deface_config=self.deface_config)
         duplicate = self.plan(
             "func",
             "sub-s03/ses-01/func/sub-s03_ses-01_task-flanker_run-1_bold",

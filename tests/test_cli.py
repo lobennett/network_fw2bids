@@ -2,6 +2,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from io import StringIO
 import os
+import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -49,6 +50,16 @@ class TestCommandLine(unittest.TestCase):
         self.tokens.append(token)
         return self.fake
 
+    @staticmethod
+    def pinned_options(root: Path) -> list[str]:
+        image = root / "pydeface.sif"
+        image.write_bytes(b"pinned test image")
+        return [
+            "--pydeface-image", str(image),
+            "--pydeface-version", "2.1.0",
+            "--pydeface-sha256", hashlib.sha256(image.read_bytes()).hexdigest(),
+        ]
+
     def test_dry_run_prints_plan_without_conversion(self) -> None:
         output = StringIO()
 
@@ -69,10 +80,34 @@ class TestCommandLine(unittest.TestCase):
         with self.assertRaises(SystemExit):
             main(["--subject", "s03", "--execute"], factory=self.factory)
 
-    def test_execute_converts_the_printed_plan_to_requested_output(self) -> None:
+    def test_execute_rejects_an_unpinned_image_before_authentication(self) -> None:
+        with self.assertRaises(SystemExit):
+            main(
+                [
+                    "--subject", "s03", "--execute", "--output", "bids",
+                    "--pydeface-image", "relative.sif",
+                    "--pydeface-version", "2.1.0",
+                    "--pydeface-sha256", "0" * 64,
+                ],
+                factory=self.factory,
+            )
+
+        self.assertEqual(self.tokens, [])
+
+    def test_execute_requires_all_pinned_defacing_options_before_authentication(self) -> None:
         with patch.dict(os.environ, {"FLYWHEEL_API_TOKEN": "test-token"}):
+            with self.assertRaises(SystemExit):
+                main(
+                    ["--subject", "s03", "--execute", "--output", "bids"],
+                    factory=self.factory,
+                )
+
+        self.assertEqual(self.tokens, [])
+
+    def test_execute_converts_the_printed_plan_to_requested_output(self) -> None:
+        with TemporaryDirectory() as scratch, patch.dict(os.environ, {"FLYWHEEL_API_TOKEN": "test-token"}):
             result = main(
-                ["--subject", "s03", "--execute", "--output", "bids"],
+                ["--subject", "s03", "--execute", "--output", "bids", *self.pinned_options(Path(scratch))],
                 factory=self.factory,
             )
 
@@ -147,8 +182,13 @@ class TestCommandLine(unittest.TestCase):
                 redirect_stderr(error), redirect_stdout(StringIO()),
             ):
                 result = main(
-                    ["--subject", "s03", "--execute", "--output", str(parent / "bids")],
-                    factory=lambda *args, **kwargs: FlywheelBIDS(client),
+                    [
+                        "--subject", "s03", "--execute", "--output", str(parent / "bids"),
+                        *self.pinned_options(Path(scratch)),
+                    ],
+                    factory=lambda *args, **kwargs: FlywheelBIDS(
+                        client, deface_config=kwargs["deface_config"]
+                    ),
                 )
             self.assertEqual(result, 1)
             self.assertIn("error:", error.getvalue())
