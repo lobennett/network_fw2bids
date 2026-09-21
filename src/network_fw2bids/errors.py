@@ -8,3 +8,7 @@ class PlanningError(NetworkFW2BIDSError):
 
 class ConversionError(NetworkFW2BIDSError):
     """A planned archive cannot be converted safely."""
+
+
+class DefacingError(NetworkFW2BIDSError):
+    """An anatomical image cannot be safely defaced and verified."""
