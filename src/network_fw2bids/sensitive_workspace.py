@@ -46,6 +46,8 @@ def _remove_stale_workspace(root: Path, prefix: str | None) -> None:
     except OSError as exc:
         raise ConversionError(f"could not inspect prior sensitive workspaces: {root}") from exc
     for stale in candidates:
+        if not stale.name.startswith(prefix):
+            continue
         suffix = stale.name.removeprefix(prefix)
         if stale.name == prefix or not _TEMPORARY_DIRECTORY_SUFFIX.fullmatch(suffix):
             continue

@@ -80,6 +80,20 @@ def test_sensitive_workspace_removes_orphan_with_the_production_job_name_pattern
         assert unrelated.is_dir()
 
 
+def test_sensitive_workspace_never_removes_unrelated_tempfile_shaped_directories(tmp_path):
+    unrelated = [tmp_path / "abcdefgh", tmp_path / "datasets"]
+    for directory in unrelated:
+        directory.mkdir()
+    environ = {
+        "SLURM_TMPDIR": str(tmp_path),
+        "SLURM_JOB_ID": "12345",
+        "SLURM_ARRAY_TASK_ID": "7",
+    }
+
+    with sensitive_workspace(environ):
+        assert all(directory.is_dir() for directory in unrelated)
+
+
 def test_sensitive_workspace_restores_signal_handlers(tmp_path):
     previous = __import__("signal").getsignal(__import__("signal").SIGTERM)
 
