@@ -124,6 +124,16 @@ class TestSubjectPlanner(unittest.TestCase):
             ["sub-s10"] * 5,
         )
 
+    def test_falls_back_to_exact_subject_label_when_sdk_filter_misses(self) -> None:
+        subject = FakeSubject("s76", [self.early_session])
+        project = FakeProject([subject])
+        project.subjects.find_first = Mock(return_value=None)
+
+        plans = SubjectPlanner(FakeClient(project), self.project_path).plan("s76")
+
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(str(plans[0].relative_prefix).split("/")[0], "sub-s76")
+
     def test_unknown_dicom_acquisition_fails_before_download(self) -> None:
         with self.assertRaisesRegex(PlanningError, "no BIDS mapping"):
             self.planner_for_acquisition("unknown-series").plan("s03")

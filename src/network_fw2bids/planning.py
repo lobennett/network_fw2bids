@@ -46,6 +46,15 @@ class SubjectPlanner:
         for flywheel_label in sorted(rules.relevant_subject_labels(subject_label)):
             subject = project.subjects.find_first(f'label="{flywheel_label}"')
             if subject is None:
+                subject = next(
+                    (
+                        candidate
+                        for candidate in project.subjects()
+                        if candidate.label == flywheel_label
+                    ),
+                    None,
+                )
+            if subject is None:
                 continue
             for session in subject.sessions():
                 override = rules.SESSION_OVERRIDES.get(flywheel_label, {}).get(

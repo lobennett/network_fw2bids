@@ -10,6 +10,12 @@ class Finder:
         label = query.split('"')[1]
         return next((item for item in self.items if item.label == label), None)
 
+    def __iter__(self):
+        return iter(self.items)
+
+    def __call__(self):
+        return self.items
+
 
 @dataclass
 class FakeFile:
