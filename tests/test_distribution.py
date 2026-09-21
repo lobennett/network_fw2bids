@@ -42,7 +42,7 @@ class TestDistribution(unittest.TestCase):
                 )
             self.assertTrue({
                 "README.md", "pyproject.toml", "uv.lock", "final_sample_subjects.txt",
-                "scripts/test.py", "scripts/submit_all_subjects.sh",
+                "scripts/run_subject_conversion.py", "scripts/submit_all_subjects.sh",
                 "src/network_fw2bids/api.py", "tests/test_conversion.py",
             }.issubset(source_files))
             self.assertIn("network_fw2bids/api.py", wheel_files)
