@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import subprocess
 from tempfile import NamedTemporaryFile
 from typing import Any, Callable
@@ -227,27 +229,71 @@ def deface_dataset(
     root = _validated_dataset_root(dataset_root)
     _require_subject(subject)
     config.validate()
+    if any(character in str(root) for character in (":", ",", "\0", "\n", "\r")):
+        raise DefacingError("unsafe container bind path for anatomical staging")
+    sources = discover_anatomy(root, subject)
     records: list[DefacedImage] = []
-    for source in discover_anatomy(root, subject):
-        _read_valid_sidecar(source)
-        output = _temporary_output_for(source)
-        if output.exists() or output.is_symlink():
-            raise DefacingError(f"PyDeface output already exists: {output}")
-        try:
-            runner(_pydeface_command(config, root, source, output), check=True)
-            record = _validate_defaced_output(root, source, output)
-            _publish_defaced_image_and_sidecar(source, output, config)
-            records.append(record)
-        except DefacingError:
-            raise
-        except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
-            raise DefacingError(f"PyDeface failed for {source.name!r}") from exc
-        finally:
-            try:
-                output.unlink(missing_ok=True)
-            except OSError as exc:
-                raise DefacingError(f"could not remove defacing output: {output}") from exc
+    if sources:
+        with _private_runtime(root) as environment:
+            for source in sources:
+                relative = source.relative_to(root).as_posix()
+                output = _temporary_output_for(source)
+                try:
+                    _read_valid_sidecar(source)
+                    if output.exists() or output.is_symlink():
+                        raise DefacingError("PyDeface output already exists")
+                    runner(
+                        _pydeface_command(config, root, source, output),
+                        check=True,
+                        capture_output=True,
+                        env=environment,
+                        cwd=root / ".network-fw2bids-tmp",
+                    )
+                    record = _validate_defaced_output(root, source, output)
+                    _publish_defaced_image_and_sidecar(source, output, config)
+                    records.append(record)
+                except DefacingError as exc:
+                    # Only our controlled validation message is exposed, without
+                    # the exception chain that may include input paths or data.
+                    raise DefacingError(f"{exc} [{relative}]") from None
+                except (subprocess.CalledProcessError, OSError):
+                    raise DefacingError(f"PyDeface failed for {relative}") from None
+                finally:
+                    try:
+                        output.unlink(missing_ok=True)
+                    except OSError:
+                        raise DefacingError(f"could not remove defacing output for {relative}") from None
     return DefacingReceipt.current(subject, config, records)
+
+
+@contextmanager
+def _private_runtime(root: Path) -> Iterator[dict[str, str]]:
+    """Confine tool scratch and runtime configuration to the sensitive tree."""
+    home = root / ".network-fw2bids-home"
+    temporary = root / ".network-fw2bids-tmp"
+    created: list[Path] = []
+    try:
+        for directory in (home, temporary):
+            # Never follow or reuse a pre-existing scratch directory.
+            directory.mkdir(mode=0o700)
+            created.append(directory)
+        environment = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith(("APPTAINER", "SINGULARITY"))
+            and key != "FLYWHEEL_API_TOKEN"
+        }
+        environment.update(HOME=str(home), TMPDIR=str(temporary), TMP=str(temporary), TEMP=str(temporary))
+        yield environment
+    except OSError:
+        raise DefacingError("could not prepare private PyDeface runtime for publishable staging") from None
+    finally:
+        for directory in reversed(created):
+            try:
+                shutil.rmtree(directory)
+                if directory.exists() or directory.is_symlink():
+                    raise OSError("cleanup incomplete")
+            except OSError:
+                raise DefacingError("could not remove private PyDeface runtime") from None
 
 
 def discover_anatomy(dataset_root: Path, subject: str) -> tuple[Path, ...]:
@@ -259,11 +305,18 @@ def discover_anatomy(dataset_root: Path, subject: str) -> tuple[Path, ...]:
         candidates = tuple(
             path
             for path in subject_directory.rglob("*")
-            if path.parent.name == "anat" and path.name.endswith(_ANATOMY_SUFFIXES)
+            if path.name.endswith(_ANATOMY_SUFFIXES)
         )
     except OSError as exc:
         raise DefacingError(f"could not discover anatomical images for {subject}") from exc
     for path in candidates:
+        parts = path.relative_to(subject_directory).parts
+        valid_location = (
+            len(parts) == 2 and parts[0] == "anat"
+            or len(parts) == 3 and re.fullmatch(r"ses-[A-Za-z0-9]+", parts[0]) and parts[1] == "anat"
+        )
+        if not valid_location:
+            raise DefacingError(f"misplaced anatomical image: {path.relative_to(dataset_root).as_posix()}")
         if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(dataset_root):
             raise DefacingError(f"anatomical image is missing or unsafe: {path}")
     return tuple(sorted(candidates, key=lambda path: path.relative_to(dataset_root).as_posix()))
@@ -277,6 +330,10 @@ def _pydeface_command(config: DefaceConfig, dataset_root: Path, source: Path, ou
         "exec",
         "--cleanenv",
         "--containall",
+        "--no-mount",
+        "home,cwd,hostfs,bind-paths,tmp",
+        "--pwd",
+        "/work/.network-fw2bids-tmp",
         "--bind",
         f"{dataset_root}:/work:rw",
         "--env",
@@ -362,12 +419,12 @@ def _read_valid_sidecar(source: Path) -> dict[str, object]:
     sidecar = _sidecar_path(source)
     try:
         if sidecar.is_symlink() or not sidecar.is_file():
-            raise DefacingError(f"anatomical sidecar is missing or unsafe: {sidecar}")
+            raise DefacingError(f"anatomical sidecar is missing or unsafe: {sidecar.name}")
         metadata = json.loads(sidecar.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        raise DefacingError(f"could not read anatomical sidecar: {sidecar}") from exc
+        raise DefacingError(f"could not read anatomical sidecar: {sidecar.name}") from exc
     if not isinstance(metadata, dict):
-        raise DefacingError(f"anatomical sidecar must be a JSON object: {sidecar}")
+        raise DefacingError(f"anatomical sidecar must be a JSON object: {sidecar.name}")
     return metadata
 
 

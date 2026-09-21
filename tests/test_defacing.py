@@ -65,7 +65,7 @@ class FakePyDeface:
     def __init__(self) -> None:
         self.commands: list[list[str]] = []
 
-    def __call__(self, command: list[str], *, check: bool) -> None:
+    def __call__(self, command: list[str], *, check: bool, **_kwargs: object) -> None:
         assert check is True
         self.commands.append(command)
         source = Path(command[command.index("pydeface") + 1].replace("/work/", ""))
@@ -80,7 +80,7 @@ class FakePyDeface:
 
 
 class CopyInputRunner:
-    def __call__(self, command: list[str], *, check: bool) -> None:
+    def __call__(self, command: list[str], *, check: bool, **_kwargs: object) -> None:
         source = Path(command[command.index("pydeface") + 1].replace("/work/", ""))
         output = Path(command[command.index("--outfile") + 1].replace("/work/", ""))
         dataset_root = Path(command[command.index("--bind") + 1].split(":", 1)[0])
@@ -115,7 +115,7 @@ def test_deface_dataset_rejects_geometry_change(tmp_path):
     bids = write_dataset_with_t1w(tmp_path)
 
     class GeometryRunner:
-        def __call__(self, command: list[str], *, check: bool) -> None:
+        def __call__(self, command: list[str], *, check: bool, **_kwargs: object) -> None:
             output = Path(command[command.index("--outfile") + 1].replace("/work/", ""))
             dataset_root = Path(command[command.index("--bind") + 1].split(":", 1)[0])
             write_image(dataset_root / output, shape=(7, 9, 10))
@@ -153,7 +153,7 @@ def test_deface_dataset_rejects_preexisting_defaced_output_before_runner(tmp_pat
     class Runner:
         called = False
 
-        def __call__(self, command: list[str], *, check: bool) -> None:
+        def __call__(self, command: list[str], *, check: bool, **_kwargs: object) -> None:
             self.called = True
 
     runner = Runner()
@@ -212,3 +212,88 @@ def test_receipt_loader_rejects_malformed_content(tmp_path):
 
     with pytest.raises(DefacingError, match="receipt"):
         load_receipt(path)
+
+
+@pytest.mark.parametrize("location", ["func", "fmap", "", "ses-01/other", "unexpected/anat"])
+@pytest.mark.parametrize("suffix", ["T1w.nii", "T2w.nii.gz"])
+def test_misplaced_anatomy_is_rejected_before_running(tmp_path, location, suffix):
+    bids = write_dataset_with_t1w(tmp_path)
+    misplaced = bids / "sub-s03" / location / f"sub-s03_{suffix}"
+    write_image(misplaced)
+    runner = FakePyDeface()
+    with pytest.raises(DefacingError, match="misplaced anatomical"):
+        deface_dataset(bids, "s03", config(tmp_path), runner=runner)
+    assert runner.commands == []
+
+
+def test_runtime_has_private_directories_and_ignores_ambient_mounts(tmp_path, monkeypatch):
+    import os
+    import stat
+
+    bids = write_dataset_with_t1w(tmp_path)
+    for variable in ("APPTAINER_BIND", "APPTAINER_BINDPATH", "APPTAINER_MOUNT", "SINGULARITY_BIND", "APPTAINERENV_TMPDIR"):
+        monkeypatch.setenv(variable, "/persistent:/leak:rw")
+    monkeypatch.setenv("FLYWHEEL_API_TOKEN", "sensitive-token")
+
+    def runtime(command, **kwargs):
+        environment = kwargs["env"]
+        assert not any(key.startswith(("APPTAINER", "SINGULARITY")) for key in environment)
+        assert "FLYWHEEL_API_TOKEN" not in environment
+        disabled = set(command[command.index("--no-mount") + 1].split(","))
+        assert {"home", "cwd", "hostfs", "bind-paths", "tmp"} <= disabled
+        assert command.count("--bind") == 1
+        assert command[command.index("--pwd") + 1] == "/work/.network-fw2bids-tmp"
+        for name, variable in ((".network-fw2bids-home", "HOME"), (".network-fw2bids-tmp", "TMPDIR")):
+            path = bids / name
+            assert path.is_dir()
+            assert stat.S_IMODE(path.stat().st_mode) == 0o700
+            assert environment[variable] == str(path)
+            assert f"{variable}=/work/{name}" in command
+            (path / "sensitive-intermediate.nii.gz").write_bytes(b"private voxels")
+        assert Path(kwargs["cwd"]) == bids / ".network-fw2bids-tmp"
+        FakePyDeface()(command, check=kwargs["check"])
+
+    deface_dataset(bids, "s03", config(tmp_path), runner=runtime)
+    assert not list(bids.glob(".network-fw2bids-*"))
+    assert os.environ["APPTAINER_BIND"] == "/persistent:/leak:rw"
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_pydeface_subprocess_output_is_never_exposed(tmp_path, capfd, exit_code):
+    import subprocess
+    import sys
+    import traceback
+
+    bids = write_dataset_with_t1w(tmp_path)
+    marker = f"sensitive-tool-output {tmp_path}/raw-dicom.dcm"
+
+    def noisy_runtime(command, **kwargs):
+        subprocess.run(
+            [sys.executable, "-c", f"import sys; print({marker!r}); print({marker!r}, file=sys.stderr); sys.exit({exit_code})"],
+            **kwargs,
+        )
+        FakePyDeface()(command, check=kwargs["check"])
+
+    if exit_code:
+        with pytest.raises(DefacingError) as caught:
+            deface_dataset(bids, "s03", config(tmp_path), runner=noisy_runtime)
+        rendered = "".join(traceback.format_exception(caught.value))
+        assert marker not in rendered
+        assert str(tmp_path) not in str(caught.value)
+        assert T1W_PATH in str(caught.value)
+    else:
+        deface_dataset(bids, "s03", config(tmp_path), runner=noisy_runtime)
+    captured = capfd.readouterr()
+    assert marker not in captured.out + captured.err
+    assert not list(bids.glob(".network-fw2bids-*"))
+
+
+@pytest.mark.parametrize("delimiter", [":", ",", "\n"])
+def test_container_rejects_bind_path_delimiters_before_running(tmp_path, delimiter):
+    directory = tmp_path / f"scratch{delimiter}unsafe"
+    directory.mkdir()
+    bids = write_dataset_with_t1w(directory)
+    runner = FakePyDeface()
+    with pytest.raises(DefacingError, match="unsafe container bind"):
+        deface_dataset(bids, "s03", config(tmp_path), runner=runner)
+    assert runner.commands == []

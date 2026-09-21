@@ -12,7 +12,7 @@ import pytest
 import network_fw2bids.conversion as conversion_module
 from network_fw2bids.conversion import DicomConverter
 from network_fw2bids.defacing import DefaceConfig
-from network_fw2bids.errors import ConversionError
+from network_fw2bids.errors import ConversionError, DefacingError
 from network_fw2bids.planning import ArchivePlan
 
 
@@ -187,7 +187,7 @@ def test_unpublishable_sensitive_artifacts_publish_nothing(tmp_path, monkeypatch
     outside = tmp_path / "outside"
     outside.write_text("not BIDS")
 
-    with pytest.raises(ConversionError, match="publishable|symbolic link"):
+    with pytest.raises((ConversionError, DefacingError), match="publishable|symbolic link"):
         convert(tmp_path, monkeypatch, PersistentArtifactRunner(artifact, outside))
 
     assert not (tmp_path / "persistent/s03").exists()
@@ -249,3 +249,33 @@ def test_commands_and_receipt_exclude_token_and_persistent_paths(tmp_path, monke
     assert str(tmp_path / "persistent") not in commands
     assert token not in receipt
     assert str(tmp_path / "node-tmp") not in receipt
+
+
+def test_planned_misplaced_anatomy_never_reaches_persistent_copy(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from network_fw2bids.errors import DefacingError
+
+    misplaced = replace(plan(), relative_prefix=Path("sub-s03/ses-01/func/sub-s03_ses-01_T1w"))
+
+    def forbidden_copy(*args, **kwargs):
+        pytest.fail("sensitive image reached persistent copy")
+
+    monkeypatch.setattr(conversion_module.shutil, "copytree", forbidden_copy)
+    with pytest.raises(DefacingError, match="misplaced anatomical"):
+        convert(tmp_path, monkeypatch, ConversionRunner(), [misplaced])
+    assert not (tmp_path / "persistent/s03").exists()
+    assert not list((tmp_path / "node-tmp").iterdir())
+
+
+def test_runtime_intermediates_are_removed_before_safe_publication(tmp_path, monkeypatch):
+    class ScratchRunner(ConversionRunner):
+        def __call__(self, command, **kwargs):
+            if command[0] == "apptainer":
+                root = Path(command[command.index("--bind") + 1].split(":", 1)[0])
+                for name in (".network-fw2bids-home", ".network-fw2bids-tmp"):
+                    (root / name / "undefaced.nii.gz").write_bytes(b"sensitive anatomy")
+            super().__call__(command, **kwargs)
+
+    destination = convert(tmp_path, monkeypatch, ScratchRunner())
+    assert not list(destination.rglob(".network-fw2bids-*"))
+    assert not list((tmp_path / "node-tmp").iterdir())

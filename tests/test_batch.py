@@ -378,3 +378,22 @@ class TestSherlockSubmission(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize("location", ["func", "fmap", "", "ses-01/other"])
+def test_assembly_rejects_misplaced_anatomy_before_copy(tmp_path, monkeypatch, location):
+    import network_fw2bids._assembly as assembly
+
+    part = _write_valid_defaced_part(tmp_path, "s03")
+    misplaced = part / "sub-s03" / location / "sub-s03_T2w.nii.gz"
+    misplaced.parent.mkdir(parents=True, exist_ok=True)
+    misplaced.write_bytes(b"undefaced anatomy")
+    misplaced.with_name("sub-s03_T2w.json").write_text("{}")
+
+    def forbidden_copy(*args, **kwargs):
+        pytest.fail("subject data copied before rejecting misplaced anatomy")
+
+    monkeypatch.setattr(assembly.shutil, "copytree", forbidden_copy)
+    with pytest.raises(ConversionError, match="defacing"):
+        assemble_subject_parts(_write_roster(tmp_path, ["s03"]), tmp_path / "parts", tmp_path / "bids")
+    assert not (tmp_path / "bids").exists()

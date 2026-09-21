@@ -12,7 +12,7 @@ import zipfile
 from flywheel.rest import ApiException
 
 from ._publication import publish_directory
-from .defacing import DefaceConfig, DefacingReceipt, load_receipt, receipt_path, write_receipt_atomic
+from .defacing import DefaceConfig, DefacingReceipt, inventory_anatomy, load_receipt, receipt_path, write_receipt_atomic
 from .errors import ConversionError, DefacingError
 from .planning import ArchivePlan
 from .sensitive_workspace import sensitive_workspace
@@ -151,12 +151,10 @@ class DicomConverter:
             if copied != expected:
                 raise ConversionError("safe publication receipt does not match defacing evidence")
             anatomy: set[str] = set()
-            for path in dataset_root.rglob("*"):
-                if path.parent.name != "anat" or not path.name.endswith(("_T1w.nii", "_T1w.nii.gz", "_T2w.nii", "_T2w.nii.gz")):
-                    continue
+            for relative in inventory_anatomy(dataset_root / f"sub-{copied.subject}"):
+                path = dataset_root / relative
                 if not path.is_file():
                     raise ConversionError("safe publication staging contains unsafe anatomy")
-                relative = path.relative_to(dataset_root).as_posix()
                 anatomy.add(relative)
                 record = next((item for item in copied.images if item.path == relative), None)
                 if record is None or cls._sha256(path) != record.output_sha256:
@@ -167,9 +165,7 @@ class DicomConverter:
                     raise ConversionError("safe publication anatomy is missing defacing metadata")
             if anatomy != {item.path for item in copied.images}:
                 raise ConversionError("safe publication anatomy does not match defacing receipt")
-        except (OSError, ValueError, json.JSONDecodeError, DefacingError) as exc:
-            if isinstance(exc, ConversionError):
-                raise
+        except (OSError, ValueError, DefacingError) as exc:
             raise ConversionError("could not verify safe publication staging") from exc
 
     @staticmethod

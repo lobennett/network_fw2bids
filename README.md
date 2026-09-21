@@ -81,6 +81,17 @@ intermediates may exist only under the current job's `$SLURM_TMPDIR`. The
 command fails when that directory is missing or unsafe, when the image digest
 does not match, or when defacing or cleanup fails.
 
+The runtime creates private home and temporary directories inside the sensitive
+workspace, uses that temporary directory as PyDeface's working directory, and
+removes both directories before checking or copying the safe BIDS tree. Ambient
+Apptainer/Singularity settings are cleared, and automatic home, working-directory,
+host-filesystem, administrator-configured, and temporary binds are disabled with
+Apptainer's `--no-mount` option. `/work` is the sole writable host-data bind.
+Tool stdout and stderr are captured in memory and discarded; failures report the
+BIDS-relative image path without raw tool output or temporary filenames.
+T1w/T2w suffixes anywhere in the subject tree are inventoried, and misplaced
+anatomy is rejected before persistent staging or assembly.
+
 Published T1w and T2w files have `Defaced: true` in their JSON sidecars and a
 checksum-verified receipt at
 `code/network_fw2bids/defacing/sub-<subject>.json`. The original anatomy is
