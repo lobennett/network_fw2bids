@@ -58,6 +58,45 @@ subject in a temporary directory and publishes it only after every archive
 succeeds. A failed conversion does not publish a partial dataset at the
 requested output path.
 
+## Anatomical privacy boundary
+
+Anatomical conversion requires a pinned Apptainer image that contains PyDeface
+2.1.0 and its FSL runtime. Give `--execute` the absolute image path, the
+expected PyDeface version, and the image's SHA-256 digest:
+
+```bash
+export PYDEFACE_IMAGE=/shared/containers/pydeface-2.1.0-fsl-6.0.7.18.sif
+export PYDEFACE_SHA256="$(sha256sum "$PYDEFACE_IMAGE" | awk '{print $1}')"
+uv run --env-file .env network-fw2bids --subject s03 --execute \
+  --output /path/to/new/subject-part \
+  --pydeface-image "$PYDEFACE_IMAGE" \
+  --pydeface-version 2.1.0 \
+  --pydeface-sha256 "$PYDEFACE_SHA256"
+```
+
+`dcm2niix -ba y` removes identifying BIDS metadata, but it does not remove
+facial voxels. PyDeface runs after conversion and before any subject part is
+published. Downloads, DICOM extraction, undefaced NIfTI files, and PyDeface
+intermediates may exist only under the current job's `$SLURM_TMPDIR`. The
+command fails when that directory is missing or unsafe, when the image digest
+does not match, or when defacing or cleanup fails.
+
+Published T1w and T2w files have `Defaced: true` in their JSON sidecars and a
+checksum-verified receipt at
+`code/network_fw2bids/defacing/sub-<subject>.json`. The original anatomy is
+never copied into a subject part, DataLad dataset, or `sourcedata` directory.
+Inspect a completed part before assembly:
+
+```bash
+jq . /path/to/subject-part/code/network_fw2bids/defacing/sub-s03.json
+find /path/to/subject-part/sub-s03 -path '*/anat/*_T?w.json' -print -exec jq '.Defaced' {} \;
+```
+
+Run one subject through this check before an array submission. Open the pilot
+T1w and T2w images and confirm visually that facial anatomy is removed. A
+valid receipt and sidecar prove the conversion contract, but they do not
+replace this visual review.
+
 Atomic publication requires macOS or Linux with filesystem support for an
 exclusive rename (`renamex_np` with `RENAME_EXCL` on macOS, `renameat2` with
 `RENAME_NOREPLACE` on Linux). Conversion fails if that operation is unavailable
