@@ -5,7 +5,10 @@ import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 
+import pytest
+
 from network_fw2bids._assembly import assemble_subject_parts, load_subjects
+from network_fw2bids.defacing import DefacedImage, DefacingReceipt, write_receipt_atomic
 from network_fw2bids.errors import ConversionError
 
 
@@ -42,11 +45,13 @@ class TestSubjectPartAssembly(unittest.TestCase):
     def _write_part(self, parts: Path, subject: str, description: dict | None = None) -> None:
         part = parts / subject
         (part / f"sub-{subject}" / "anat").mkdir(parents=True)
-        (part / f"sub-{subject}" / "anat" / f"sub-{subject}_T1w.nii.gz").write_bytes(b"nii")
-        (part / f"sub-{subject}" / "anat" / f"sub-{subject}_T1w.json").write_text("{}")
+        image = part / f"sub-{subject}" / "anat" / f"sub-{subject}_T1w.nii.gz"
+        image.write_bytes(b"defaced nii")
+        image.with_name(f"sub-{subject}_T1w.json").write_text('{"Defaced": true}')
         (part / "dataset_description.json").write_text(
             json.dumps(description or {"Name": "r01network export", "BIDSVersion": "1.10.1"})
         )
+        _write_defacing_receipt(part, subject, [image])
 
     def test_assembles_complete_parts_into_one_atomic_dataset(self) -> None:
         with TemporaryDirectory() as scratch:
@@ -116,6 +121,138 @@ class TestSubjectPartAssembly(unittest.TestCase):
             with self.assertRaises(ConversionError):
                 assemble_subject_parts(roster, parts, destination)
             self.assertFalse(destination.exists())
+
+
+def _write_defacing_receipt(part: Path, subject: str, images: list[Path]) -> None:
+    import hashlib
+
+    receipt = DefacingReceipt(
+        schema_version=1,
+        subject=subject,
+        status="success",
+        software={
+            "name": "PyDeface",
+            "version": "2.1.0",
+            "container": "pydeface.sif",
+            "sha256": "a" * 64,
+        },
+        images=tuple(
+            DefacedImage(
+                path=image.relative_to(part).as_posix(),
+                input_sha256="b" * 64,
+                output_sha256=hashlib.sha256(image.read_bytes()).hexdigest(),
+                shape=(3, 4, 5),
+                zooms=(1.0, 1.0, 1.0),
+                affine_sha256="c" * 64,
+            )
+            for image in images
+        ),
+    )
+    write_receipt_atomic(part, receipt)
+
+
+def _write_valid_defaced_part(root: Path, subject: str) -> Path:
+    part = root / "parts" / subject
+    image = part / f"sub-{subject}" / "anat" / f"sub-{subject}_T1w.nii.gz"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"defaced nii")
+    image.with_name(f"sub-{subject}_T1w.json").write_text('{"Defaced": true}')
+    (part / "dataset_description.json").write_text(
+        json.dumps({"Name": "r01network export", "BIDSVersion": "1.10.1"})
+    )
+    _write_defacing_receipt(part, subject, [image])
+    return part
+
+
+def _write_roster(root: Path, subjects: list[str]) -> Path:
+    roster = root / "subjects.txt"
+    roster.write_text("\n".join(subjects) + "\n")
+    return roster
+
+
+def _mutate_part(part: Path, subject: str, mutation: str) -> None:
+    receipt_path = part / "code/network_fw2bids/defacing" / f"sub-{subject}.json"
+    image = part / f"sub-{subject}/anat/sub-{subject}_T1w.nii.gz"
+    sidecar = image.with_name(f"sub-{subject}_T1w.json")
+    if mutation == "missing_receipt":
+        receipt_path.unlink()
+    elif mutation == "extra_entry":
+        receipt = json.loads(receipt_path.read_text())
+        receipt["images"].append({
+            **receipt["images"][0],
+            "path": f"sub-{subject}/anat/sub-{subject}_extra_T1w.nii.gz",
+        })
+        receipt_path.write_text(json.dumps(receipt))
+    elif mutation == "missing_entry":
+        receipt = json.loads(receipt_path.read_text())
+        receipt["images"] = []
+        receipt_path.write_text(json.dumps(receipt))
+    elif mutation == "bad_checksum":
+        receipt = json.loads(receipt_path.read_text())
+        receipt["images"][0]["output_sha256"] = "d" * 64
+        receipt_path.write_text(json.dumps(receipt))
+    elif mutation == "defaced_false":
+        sidecar.write_text('{"Defaced": false}')
+    elif mutation == "symlinked_image":
+        external = part.parent / "external.nii.gz"
+        external.write_bytes(b"defaced nii")
+        image.unlink()
+        image.symlink_to(external)
+    elif mutation == "malformed_receipt":
+        receipt_path.write_text("not json")
+    else:
+        raise AssertionError(f"unknown mutation: {mutation}")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_receipt",
+        "extra_entry",
+        "missing_entry",
+        "bad_checksum",
+        "defaced_false",
+        "symlinked_image",
+        "malformed_receipt",
+    ],
+)
+def test_assembly_rejects_unverified_anatomy(tmp_path, mutation):
+    part = _write_valid_defaced_part(tmp_path, "s03")
+    _mutate_part(part, "s03", mutation)
+
+    with pytest.raises(ConversionError, match="defacing"):
+        assemble_subject_parts(_write_roster(tmp_path, ["s03"]), tmp_path / "parts", tmp_path / "bids")
+
+    assert not (tmp_path / "bids").exists()
+
+
+def test_assembly_copies_verified_receipt(tmp_path):
+    _write_valid_defaced_part(tmp_path, "s03")
+
+    assemble_subject_parts(_write_roster(tmp_path, ["s03"]), tmp_path / "parts", tmp_path / "bids")
+
+    assert (tmp_path / "bids/code/network_fw2bids/defacing/sub-s03.json").is_file()
+
+
+def test_assembly_rejects_anatomy_tampered_while_staging(tmp_path, monkeypatch):
+    import network_fw2bids._assembly as assembly
+
+    _write_valid_defaced_part(tmp_path, "s03")
+    original_copytree = assembly.shutil.copytree
+
+    def tampering_copytree(source, target, *args, **kwargs):
+        copied = original_copytree(source, target, *args, **kwargs)
+        target = Path(target)
+        if target.name == "sub-s03":
+            (target / "anat/sub-s03_T1w.nii.gz").write_bytes(b"tampered during staging")
+        return copied
+
+    monkeypatch.setattr(assembly.shutil, "copytree", tampering_copytree)
+
+    with pytest.raises(ConversionError, match="staged defacing"):
+        assemble_subject_parts(_write_roster(tmp_path, ["s03"]), tmp_path / "parts", tmp_path / "bids")
+
+    assert not (tmp_path / "bids").exists()
 
 
 class TestSherlockSubmission(unittest.TestCase):

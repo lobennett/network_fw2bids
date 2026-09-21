@@ -9,7 +9,8 @@ import sys
 from tempfile import TemporaryDirectory
 
 from ._publication import publish_directory
-from .errors import ConversionError, NetworkFW2BIDSError
+from .defacing import receipt_path, verify_subject_defacing
+from .errors import ConversionError, DefacingError, NetworkFW2BIDSError
 
 
 SUBJECT_PATTERN = re.compile(r"s[0-9]+")
@@ -33,7 +34,7 @@ def load_subjects(path: Path) -> tuple[str, ...]:
 def _inspect_part(part: Path, subject: str) -> dict[str, object]:
     subject_directory = part / f"sub-{subject}"
     description_path = part / "dataset_description.json"
-    expected_names = {description_path.name, subject_directory.name}
+    expected_names = {description_path.name, subject_directory.name, "code"}
     try:
         actual_names = {entry.name for entry in part.iterdir()}
         if actual_names != expected_names:
@@ -57,7 +58,7 @@ def _require_complete_subject_tree(subject_directory: Path) -> None:
     files: list[Path] = []
     for path in subject_directory.rglob("*"):
         if path.is_symlink():
-            raise ConversionError(f"subject part contains a symbolic link: {path}")
+            raise ConversionError(f"defacing subject part contains a symbolic link: {path}")
         if path.is_file():
             try:
                 if path.stat().st_size == 0:
@@ -93,7 +94,11 @@ def assemble_subject_parts(subjects_file: Path, parts_directory: Path, destinati
         part = parts_directory / subject
         if not part.is_dir() or part.is_symlink():
             raise ConversionError(f"subject part is missing or unsafe: {part}")
-        descriptions[subject] = _inspect_part(part, subject)
+        try:
+            descriptions[subject] = _inspect_part(part, subject)
+            verify_subject_defacing(part, subject)
+        except DefacingError as exc:
+            raise ConversionError(f"could not verify defacing evidence for {subject}") from exc
     first_description = descriptions[subjects[0]]
     inconsistent = [subject for subject in subjects if descriptions[subject] != first_description]
     if inconsistent:
@@ -115,7 +120,14 @@ def assemble_subject_parts(subjects_file: Path, parts_directory: Path, destinati
                     staged / f"sub-{subject}",
                     symlinks=False,
                 )
+                receipt_destination = receipt_path(staged, subject)
+                receipt_destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(receipt_path(parts_directory / subject, subject), receipt_destination)
+            for subject in subjects:
+                verify_subject_defacing(staged, subject)
             publish_directory(staged, destination)
+    except DefacingError as exc:
+        raise ConversionError("could not verify staged defacing evidence") from exc
     except OSError as exc:
         raise ConversionError(f"could not assemble BIDS dataset at {destination}") from exc
 

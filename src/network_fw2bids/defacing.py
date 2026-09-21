@@ -134,6 +134,56 @@ def load_receipt(path: Path) -> DefacingReceipt:
     return parse_receipt(value)
 
 
+def inventory_anatomy(subject_directory: Path) -> tuple[str, ...]:
+    """Return the exact BIDS-relative T1w/T2w inventory for one subject tree."""
+    subject_directory = Path(subject_directory)
+    if not subject_directory.name.startswith("sub-"):
+        raise DefacingError(f"defacing subject directory is invalid: {subject_directory}")
+    subject = subject_directory.name.removeprefix("sub-")
+    root = subject_directory.parent
+    return tuple(
+        image.relative_to(root).as_posix()
+        for image in discover_anatomy(root, subject)
+    )
+
+
+def verify_published_image(dataset_root: Path, image: DefacedImage) -> None:
+    """Verify a receipt entry against its published image and sidecar."""
+    root = _validated_dataset_root(dataset_root)
+    _require_safe_relative_path(image.path)
+    published = root / PurePosixPath(image.path)
+    try:
+        if (
+            published.is_symlink()
+            or not published.is_file()
+            or not published.resolve(strict=True).is_relative_to(root)
+        ):
+            raise DefacingError(f"defacing image is missing or unsafe: {published}")
+        if _sha256(published) != image.output_sha256:
+            raise DefacingError(f"defacing checksum does not match receipt: {published}")
+        if _read_valid_sidecar(published).get("Defaced") is not True:
+            raise DefacingError(f"defacing image sidecar is not marked Defaced: {published}")
+    except OSError as exc:
+        raise DefacingError(f"could not verify defacing image: {published}") from exc
+
+
+def verify_subject_defacing(part: Path, subject: str) -> DefacingReceipt:
+    """Verify that one subject part has complete, untampered defacing evidence."""
+    root = _validated_dataset_root(part)
+    _require_subject(subject)
+    _require_safe_receipt_tree(root, subject)
+    receipt = load_receipt(receipt_path(root, subject))
+    if receipt.subject != subject:
+        raise DefacingError("defacing receipt subject does not match subject part")
+    anatomy = set(inventory_anatomy(root / f"sub-{subject}"))
+    evidence = {image.path for image in receipt.images}
+    if anatomy != evidence:
+        raise DefacingError("defacing receipt does not match anatomical inventory")
+    for image in receipt.images:
+        verify_published_image(root, image)
+    return receipt
+
+
 def parse_receipt(value: object) -> DefacingReceipt:
     """Parse receipt JSON with strict types and safe relative image paths."""
     if not isinstance(value, dict):
@@ -406,6 +456,26 @@ def _require_no_symlinked_directories(subject_directory: Path) -> None:
                     raise DefacingError(f"subject directory contains an unsafe symbolic link: {candidate}")
     except OSError as exc:
         raise DefacingError(f"could not inspect subject directory: {subject_directory}") from exc
+
+
+def _require_safe_receipt_tree(dataset_root: Path, subject: str) -> None:
+    receipt = receipt_path(dataset_root, subject)
+    expected_directories = (
+        dataset_root / "code",
+        dataset_root / "code" / "network_fw2bids",
+        dataset_root / "code" / "network_fw2bids" / "defacing",
+    )
+    try:
+        for directory in expected_directories:
+            if directory.is_symlink() or not directory.is_dir():
+                raise DefacingError(f"defacing receipt directory is missing or unsafe: {directory}")
+        for path in (dataset_root / "code").rglob("*"):
+            if path.is_symlink():
+                raise DefacingError(f"defacing receipt tree contains a symbolic link: {path}")
+            if not path.is_file() and not path.is_dir():
+                raise DefacingError(f"defacing receipt tree contains an unsafe entry: {path}")
+    except OSError as exc:
+        raise DefacingError(f"could not inspect defacing receipt tree: {receipt}") from exc
 
 
 def _container_identity(image: Path) -> str:
