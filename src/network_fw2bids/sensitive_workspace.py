@@ -13,6 +13,7 @@ from .errors import ConversionError
 
 
 _SAFE_JOB_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+_TEMPORARY_DIRECTORY_SUFFIX = re.compile(r"[a-z0-9_]{8}\Z")
 
 
 class _SensitiveWorkspaceInterrupted(BaseException):
@@ -28,32 +29,36 @@ def _validated_job_value(environ: Mapping[str, str], name: str) -> str | None:
     return value
 
 
-def _workspace_prefix(environ: Mapping[str, str]) -> tuple[str, str | None]:
+def _workspace_prefix(environ: Mapping[str, str]) -> str | None:
     job_id = _validated_job_value(environ, "SLURM_JOB_ID")
     task_id = _validated_job_value(environ, "SLURM_ARRAY_TASK_ID")
     values = tuple(value for value in (job_id, task_id) if value is not None)
     if not values:
-        return "network-fw2bids-sensitive-", None
-    owned_name = "network-fw2bids-sensitive-" + "-".join(values)
-    return owned_name + "-", owned_name
+        return None
+    return "network-fw2bids-sensitive-" + "-".join(values) + "-"
 
 
-def _remove_stale_workspace(root: Path, name: str | None) -> None:
-    if name is None:
+def _remove_stale_workspace(root: Path, prefix: str | None) -> None:
+    if prefix is None:
         return
-    stale = root / name
     try:
-        info = stale.lstat()
-    except FileNotFoundError:
-        return
+        candidates = tuple(root.iterdir())
     except OSError as exc:
-        raise ConversionError(f"could not inspect prior sensitive workspace: {stale}") from exc
-    if stale.is_symlink() or not stale.is_dir() or info.st_uid != os.getuid():
-        raise ConversionError(f"prior sensitive workspace is unsafe: {stale}")
-    try:
-        shutil.rmtree(stale)
-    except OSError as exc:
-        raise ConversionError(f"could not remove prior sensitive workspace: {stale}") from exc
+        raise ConversionError(f"could not inspect prior sensitive workspaces: {root}") from exc
+    for stale in candidates:
+        suffix = stale.name.removeprefix(prefix)
+        if stale.name == prefix or not _TEMPORARY_DIRECTORY_SUFFIX.fullmatch(suffix):
+            continue
+        try:
+            info = stale.lstat()
+        except OSError as exc:
+            raise ConversionError(f"could not inspect prior sensitive workspace: {stale}") from exc
+        if stale.is_symlink() or not stale.is_dir() or info.st_uid != os.getuid():
+            raise ConversionError(f"prior sensitive workspace is unsafe: {stale}")
+        try:
+            shutil.rmtree(stale)
+        except OSError as exc:
+            raise ConversionError(f"could not remove prior sensitive workspace: {stale}") from exc
 
 
 def _install_cleanup_handlers() -> dict[int, signal.Handlers]:
@@ -94,8 +99,9 @@ def sensitive_workspace(environ: Mapping[str, str] = os.environ) -> Iterator[Pat
     if resolved == Path(resolved.anchor):
         raise ConversionError("SLURM_TMPDIR cannot be a filesystem root")
 
-    prefix, stale_name = _workspace_prefix(environ)
-    _remove_stale_workspace(resolved, stale_name)
+    job_prefix = _workspace_prefix(environ)
+    _remove_stale_workspace(resolved, job_prefix)
+    prefix = job_prefix or "network-fw2bids-sensitive-"
     workspace: Path | None = None
     try:
         with TemporaryDirectory(prefix=prefix, dir=resolved) as name:

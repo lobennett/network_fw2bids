@@ -124,15 +124,86 @@ def test_deface_dataset_rejects_geometry_change(tmp_path):
         deface_dataset(bids, "s03", config(tmp_path), runner=GeometryRunner())
 
 
+@pytest.mark.parametrize("unsafe_directory", ["session", "anat"])
+def test_deface_dataset_rejects_anatomy_behind_symlinked_directory(tmp_path, unsafe_directory):
+    bids = tmp_path / "bids"
+    subject = bids / "sub-s03"
+    subject.mkdir(parents=True)
+    target = tmp_path / "target"
+    if unsafe_directory == "session":
+        write_image(target / "anat" / "sub-s03_ses-01_T1w.nii.gz")
+        (target / "anat" / "sub-s03_ses-01_T1w.json").write_text("{}")
+        (subject / "ses-01").symlink_to(target, target_is_directory=True)
+    else:
+        session = subject / "ses-01"
+        session.mkdir()
+        write_image(target / "sub-s03_ses-01_T1w.nii.gz")
+        (target / "sub-s03_ses-01_T1w.json").write_text("{}")
+        (session / "anat").symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(DefacingError, match="unsafe"):
+        deface_dataset(bids, "s03", config(tmp_path), runner=FakePyDeface())
+
+
+def test_deface_dataset_rejects_preexisting_defaced_output_before_runner(tmp_path):
+    bids = write_dataset_with_t1w(tmp_path)
+    stale_output = bids / "sub-s03/ses-01/anat/.sub-s03_ses-01_T1w.defaced.nii.gz"
+    stale_output.write_bytes(b"stale")
+
+    class Runner:
+        called = False
+
+        def __call__(self, command: list[str], *, check: bool) -> None:
+            self.called = True
+
+    runner = Runner()
+    with pytest.raises(DefacingError, match="already exists"):
+        deface_dataset(bids, "s03", config(tmp_path), runner=runner)
+    assert runner.called is False
+
+
 def test_receipt_is_written_atomically_and_loaded(tmp_path):
     bids = write_dataset_with_t1w(tmp_path)
-    receipt = deface_dataset(bids, "s03", config(tmp_path), runner=FakePyDeface())
+    pinned = config(tmp_path)
+    receipt = deface_dataset(bids, "s03", pinned, runner=FakePyDeface())
 
     path = write_receipt_atomic(bids, receipt)
 
     assert path == receipt_path(bids, "s03")
     assert load_receipt(path) == receipt
-    assert "bids" not in path.read_text()
+    serialized = json.loads(path.read_text())
+    assert serialized["software"] == {
+        "name": "PyDeface",
+        "version": "2.1.0",
+        "container": "pydeface.sif",
+        "sha256": pinned.sha256,
+    }
+    assert str(pinned.image) not in path.read_text()
+
+
+@pytest.mark.parametrize(
+    "software",
+    [
+        {"name": "PyDeface", "version": "2.1.0", "sha256": "a" * 64},
+        {"name": "PyDeface", "version": "2.1.0", "container": "image.sif", "sha256": "A" * 64},
+        {"name": "Other", "version": "2.1.0", "container": "image.sif", "sha256": "a" * 64},
+        {"name": "PyDeface", "version": "", "container": "image.sif", "sha256": "a" * 64},
+        {"name": "PyDeface", "version": "2.1.0", "container": "/tmp/image.sif", "sha256": "a" * 64},
+        {"name": "PyDeface", "version": "2.1.0", "container": "image.sif", "sha256": "a" * 64, "image": "extra"},
+    ],
+)
+def test_receipt_loader_requires_exact_pydeface_provenance(tmp_path, software):
+    path = tmp_path / "sub-s03.json"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "subject": "s03",
+        "status": "success",
+        "software": software,
+        "images": [],
+    }))
+
+    with pytest.raises(DefacingError, match="software"):
+        load_receipt(path)
 
 
 def test_receipt_loader_rejects_malformed_content(tmp_path):

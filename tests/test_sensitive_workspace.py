@@ -1,5 +1,7 @@
 import os
+from pathlib import Path
 import stat
+from tempfile import mkdtemp
 
 import pytest
 
@@ -62,9 +64,8 @@ def test_sensitive_workspace_uses_only_validated_job_identifiers(tmp_path):
             pass
 
 
-def test_sensitive_workspace_removes_only_matching_stale_job_directory(tmp_path):
-    stale = tmp_path / "network-fw2bids-sensitive-12345-7"
-    stale.mkdir()
+def test_sensitive_workspace_removes_orphan_with_the_production_job_name_pattern(tmp_path):
+    stale = Path(mkdtemp(prefix="network-fw2bids-sensitive-12345-7-", dir=tmp_path))
     (stale / "sensitive").write_text("data")
     unrelated = tmp_path / "network-fw2bids-sensitive-unrelated"
     unrelated.mkdir()

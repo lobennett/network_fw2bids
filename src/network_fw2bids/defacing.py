@@ -73,7 +73,7 @@ class DefacingReceipt:
             software={
                 "name": "PyDeface",
                 "version": config.version,
-                "image": str(config.image),
+                "container": _container_identity(config.image),
                 "sha256": config.sha256,
             },
             images=tuple(images),
@@ -149,8 +149,7 @@ def parse_receipt(value: object) -> DefacingReceipt:
     ):
         raise DefacingError("defacing receipt has invalid fields")
     _require_subject(subject)
-    if not software or any(not isinstance(key, str) or not isinstance(item, str) for key, item in software.items()):
-        raise DefacingError("defacing receipt has invalid software evidence")
+    _validate_software(software)
     try:
         parsed_images = tuple(_parse_defaced_image(image) for image in images)
     except (KeyError, TypeError, ValueError) as exc:
@@ -174,6 +173,8 @@ def deface_dataset(
     for source in discover_anatomy(root, subject):
         _read_valid_sidecar(source)
         output = _temporary_output_for(source)
+        if output.exists() or output.is_symlink():
+            raise DefacingError(f"PyDeface output already exists: {output}")
         try:
             runner(_pydeface_command(config, root, source, output), check=True)
             record = _validate_defaced_output(root, source, output)
@@ -195,6 +196,7 @@ def discover_anatomy(dataset_root: Path, subject: str) -> tuple[Path, ...]:
     subject_directory = dataset_root / f"sub-{subject}"
     if subject_directory.is_symlink() or not subject_directory.is_dir():
         raise DefacingError(f"subject directory is missing or unsafe: {subject_directory}")
+    _require_no_symlinked_directories(subject_directory)
     try:
         candidates = tuple(
             path
@@ -351,8 +353,7 @@ def _validate_receipt(receipt: DefacingReceipt) -> None:
     if receipt.schema_version != 1 or receipt.status != "success":
         raise DefacingError("defacing receipt has an unsupported schema or status")
     _require_subject(receipt.subject)
-    if not receipt.software or any(not isinstance(key, str) or not isinstance(value, str) for key, value in receipt.software.items()):
-        raise DefacingError("defacing receipt has invalid software evidence")
+    _validate_software(receipt.software)
     seen: set[str] = set()
     for image in receipt.images:
         _require_safe_relative_path(image.path)
@@ -386,6 +387,44 @@ def _require_safe_relative_path(value: str) -> None:
     path = PurePosixPath(value)
     if not value or "\0" in value or path.is_absolute() or ".." in path.parts or path.as_posix() != value:
         raise DefacingError("defacing receipt has an unsafe anatomical path")
+
+
+def _require_no_symlinked_directories(subject_directory: Path) -> None:
+    try:
+        for directory, names, _files in os.walk(subject_directory, followlinks=False):
+            for name in names:
+                candidate = Path(directory) / name
+                if candidate.is_symlink():
+                    raise DefacingError(f"subject directory contains an unsafe symbolic link: {candidate}")
+    except OSError as exc:
+        raise DefacingError(f"could not inspect subject directory: {subject_directory}") from exc
+
+
+def _container_identity(image: Path) -> str:
+    identity = Path(image).name
+    if not identity:
+        raise DefacingError("PyDeface image has no safe container identity")
+    return identity
+
+
+def _validate_software(software: object) -> None:
+    required = {"name", "version", "container", "sha256"}
+    if not isinstance(software, dict) or set(software) != required:
+        raise DefacingError("defacing receipt has invalid software evidence")
+    if any(not isinstance(key, str) or not isinstance(value, str) for key, value in software.items()):
+        raise DefacingError("defacing receipt has invalid software evidence")
+    if software["name"] != "PyDeface" or not software["version"]:
+        raise DefacingError("defacing receipt has invalid software evidence")
+    container = software["container"]
+    if (
+        not container
+        or container in {".", ".."}
+        or "/" in container
+        or "\\" in container
+        or any(character in container for character in ("\0", "\n", "\r"))
+        or not _SHA256.fullmatch(software["sha256"])
+    ):
+        raise DefacingError("defacing receipt has invalid software evidence")
 
 
 def _sha256(path: Path) -> str:
