@@ -31,6 +31,14 @@ class DefaceConfig:
     version: str
     sha256: str
 
+    def validate(self) -> None:
+        image = Path(self.image)
+        if not image.is_absolute():
+            raise DefacingError("PyDeface image path must be absolute")
+        if image.is_symlink():
+            raise DefacingError("PyDeface image path must not be a symbolic link")
+        self.verify_image_checksum()
+
     def verify_image_checksum(self) -> None:
         if not self.version:
             raise DefacingError("PyDeface version is required")
@@ -168,7 +176,7 @@ def deface_dataset(
     """Deface every T1w/T2w in one staged BIDS subject tree."""
     root = _validated_dataset_root(dataset_root)
     _require_subject(subject)
-    config.verify_image_checksum()
+    config.validate()
     records: list[DefacedImage] = []
     for source in discover_anatomy(root, subject):
         _read_valid_sidecar(source)

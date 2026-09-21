@@ -39,6 +39,7 @@ class DicomConverter:
         subject = self._subject_from_plans(plans)
         if self._deface_config is None:
             raise ConversionError("PyDeface configuration is required for conversion")
+        self._deface_config.validate()
         try:
             self._require_new_destination(destination)
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -56,8 +57,9 @@ class DicomConverter:
 
                     receipt = deface_dataset(staged, subject, self._deface_config, self._runner)
                     write_receipt_atomic(staged, receipt)
+                    self._verify_publishable_inventory(staged, plans, receipt)
                     shutil.copytree(staged, safe_stage, symlinks=False)
-                    self._verify_safe_copy(safe_stage, receipt)
+                    self._verify_safe_copy(safe_stage, plans, receipt)
                 publish_directory(safe_stage, destination)
         except OSError as exc:
             raise ConversionError(f"could not prepare or write BIDS dataset at {destination}") from exc
@@ -78,13 +80,73 @@ class DicomConverter:
         return subjects.pop()
 
     @classmethod
-    def _verify_safe_copy(cls, dataset_root: Path, expected: DefacingReceipt) -> None:
+    def _verify_publishable_inventory(
+        cls,
+        dataset_root: Path,
+        plans: Sequence[ArchivePlan],
+        receipt: DefacingReceipt,
+    ) -> set[str]:
+        if dataset_root.is_symlink() or not dataset_root.is_dir():
+            raise ConversionError("publishable BIDS staging is missing or unsafe")
+        expected_files = {
+            "dataset_description.json",
+            receipt_path(dataset_root, receipt.subject).relative_to(dataset_root).as_posix(),
+        }
+        for plan in plans:
+            prefixes = (
+                (Path(f"{plan.relative_prefix}_magnitude"), Path(f"{plan.relative_prefix}_fieldmap"))
+                if plan.modality == "fmap"
+                else (plan.relative_prefix,)
+            )
+            for prefix in prefixes:
+                candidates = (Path(f"{prefix}.nii"), Path(f"{prefix}.nii.gz"))
+                images = [candidate for candidate in candidates if (dataset_root / candidate).exists()]
+                if len(images) != 1:
+                    raise ConversionError("publishable BIDS staging has an unexpected image inventory")
+                image = dataset_root / images[0]
+                sidecar = dataset_root / prefix.with_suffix(".json")
+                if image.is_symlink() or sidecar.is_symlink() or not image.is_file() or not sidecar.is_file():
+                    raise ConversionError("publishable BIDS staging contains an unsafe expected output")
+                expected_files.update((images[0].as_posix(), prefix.with_suffix(".json").as_posix()))
+            if plan.modality == "dwi":
+                for extension in (".bval", ".bvec"):
+                    companion = dataset_root / plan.relative_prefix.with_suffix(extension)
+                    if companion.is_symlink() or not companion.is_file():
+                        raise ConversionError("publishable BIDS staging contains an unsafe expected output")
+                    expected_files.add(plan.relative_prefix.with_suffix(extension).as_posix())
+
+        actual_files: set[str] = set()
+        actual_directories: set[str] = set()
         try:
-            if dataset_root.is_symlink() or not dataset_root.is_dir():
-                raise ConversionError("safe publication staging is missing or unsafe")
             for path in dataset_root.rglob("*"):
                 if path.is_symlink():
-                    raise ConversionError("safe publication staging contains a symbolic link")
+                    raise ConversionError("publishable BIDS staging contains a symbolic link")
+                relative = path.relative_to(dataset_root).as_posix()
+                if path.is_file():
+                    actual_files.add(relative)
+                elif path.is_dir():
+                    actual_directories.add(relative)
+                else:
+                    raise ConversionError("publishable BIDS staging contains an unsafe entry")
+        except OSError as exc:
+            raise ConversionError("could not inspect publishable BIDS staging") from exc
+
+        expected_directories: set[str] = set()
+        for filename in expected_files:
+            parent = Path(filename).parent
+            while parent != Path("."):
+                expected_directories.add(parent.as_posix())
+                parent = parent.parent
+        if actual_files != expected_files or actual_directories != expected_directories:
+            raise ConversionError("publishable BIDS staging has unexpected files or directories")
+        return expected_files
+
+    @classmethod
+    def _verify_safe_copy(
+        cls, dataset_root: Path, plans: Sequence[ArchivePlan], expected: DefacingReceipt
+    ) -> None:
+        try:
+            cls._verify_publishable_inventory(dataset_root, plans, expected)
             copied = load_receipt(receipt_path(dataset_root, expected.subject))
             if copied != expected:
                 raise ConversionError("safe publication receipt does not match defacing evidence")

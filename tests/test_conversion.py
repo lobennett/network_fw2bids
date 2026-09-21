@@ -370,6 +370,20 @@ class TestDicomConverter(unittest.TestCase):
 
         self.assertFalse(self.destination.exists())
 
+    def test_rejects_unpinned_config_before_destination_or_download(self) -> None:
+        self.archive_writer = Mock()
+        destination = self.root / "new-parent/bids"
+        unpinned = DefaceConfig(Path("relative-pydeface.sif"), "2.1.0", "0" * 64)
+
+        with self.assertRaisesRegex(Exception, "absolute"):
+            DicomConverter(self.runner, unpinned).convert(
+                [self.functional_plan], destination, "r01network"
+            )
+
+        self.archive_writer.assert_not_called()
+        self.runner.assert_not_called()
+        self.assertFalse(destination.parent.exists())
+
     def test_wraps_failed_archive_download(self) -> None:
         def fail_download(path: Path) -> None:
             raise OSError("download failed")

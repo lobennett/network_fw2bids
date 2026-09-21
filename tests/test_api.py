@@ -76,6 +76,12 @@ class TestFlywheelBIDS(unittest.TestCase):
 
         client_factory.assert_not_called()
 
+    def test_constructor_rejects_unpinned_defacing_config(self) -> None:
+        config = DefaceConfig(Path("relative-pydeface.sif"), "2.1.0", "0" * 64)
+
+        with self.assertRaisesRegex(DefacingError, "absolute"):
+            FlywheelBIDS(self.client, deface_config=config)
+
     def test_supplied_plan_paths_cannot_escape_the_staged_dataset(self) -> None:
         for kind in ("absolute", "parent"):
             with self.subTest(kind=kind), TemporaryDirectory() as scratch:

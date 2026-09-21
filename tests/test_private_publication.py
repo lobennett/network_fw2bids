@@ -134,6 +134,30 @@ class MissingSidecarRunner(ConversionRunner):
             (output / "converted.json").unlink()
 
 
+class PersistentArtifactRunner(ConversionRunner):
+    def __init__(self, artifact: str, outside: Path) -> None:
+        super().__init__()
+        self.artifact = artifact
+        self.outside = outside
+
+    def __call__(self, command: list[str], **kwargs: object) -> None:
+        super().__call__(command, **kwargs)
+        if command[0] != "dcm2niix":
+            return
+        converted = Path(command[command.index("-o") + 1])
+        sensitive = converted.parent.parent
+        staged = sensitive / "bids"
+        if self.artifact == "container-scratch":
+            scratch = staged / ".network-fw2bids-tmp"
+            scratch.mkdir()
+            (scratch / "undefaced.nii.gz").write_bytes(b"sensitive")
+        elif self.artifact == "unexpected-nifti":
+            (staged / "sub-s03/ses-01/func").mkdir(parents=True)
+            (staged / "sub-s03/ses-01/func/unplanned.nii.gz").write_bytes(b"artifact")
+        else:
+            (staged / "source-link").symlink_to(self.outside)
+
+
 def test_pydeface_failure_publishes_nothing(tmp_path, monkeypatch):
     with pytest.raises(Exception, match="PyDeface"):
         convert(tmp_path, monkeypatch, FailingDefaceRunner())
@@ -155,6 +179,17 @@ def test_malformed_deface_output_publishes_nothing(tmp_path, monkeypatch):
 def test_missing_anatomical_sidecar_publishes_nothing(tmp_path, monkeypatch):
     with pytest.raises(ConversionError, match="JSON sidecar"):
         convert(tmp_path, monkeypatch, MissingSidecarRunner())
+    assert not (tmp_path / "persistent/s03").exists()
+
+
+@pytest.mark.parametrize("artifact", ["container-scratch", "unexpected-nifti", "source-symlink"])
+def test_unpublishable_sensitive_artifacts_publish_nothing(tmp_path, monkeypatch, artifact):
+    outside = tmp_path / "outside"
+    outside.write_text("not BIDS")
+
+    with pytest.raises(ConversionError, match="publishable|symbolic link"):
+        convert(tmp_path, monkeypatch, PersistentArtifactRunner(artifact, outside))
+
     assert not (tmp_path / "persistent/s03").exists()
 
 

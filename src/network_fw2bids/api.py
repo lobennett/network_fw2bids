@@ -9,7 +9,7 @@ from flywheel.rest import ApiException
 
 from .conversion import DicomConverter
 from .defacing import DefaceConfig
-from .errors import DefacingError, PlanningError
+from .errors import PlanningError
 from .planning import ArchivePlan, SubjectPlanner
 
 
@@ -26,6 +26,8 @@ class FlywheelBIDS:
         runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
         deface_config: DefaceConfig | None = None,
     ) -> None:
+        if deface_config is not None:
+            _require_pinned_deface_config(deface_config)
         self._project_path = project_path
         self._planner = SubjectPlanner(client, project_path)
         self._converter = DicomConverter(runner, deface_config)
@@ -60,9 +62,4 @@ class FlywheelBIDS:
 
 
 def _require_pinned_deface_config(config: DefaceConfig) -> None:
-    image = Path(config.image)
-    if not image.is_absolute():
-        raise DefacingError("PyDeface image path must be absolute")
-    if image.is_symlink():
-        raise DefacingError("PyDeface image path must not be a symbolic link")
-    config.verify_image_checksum()
+    config.validate()
