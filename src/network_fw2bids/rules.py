@@ -71,16 +71,6 @@ SKIP_ACQUISITIONS = {
     "T1w MPRAGE PROMO",
 }
 
-SUBJECT_ALIASES = {
-    "s19-2": "s19",
-    "s29-2": "s29",
-    "s43-2": "s43",
-    "ex26207": "s297",
-}
-SESSION_OVERRIDES = {
-    "s03": {"22752": {"reassign_to": "s10"}},
-    "s29": {"22424": {"exclude": True}},
-}
 SESSION_MERGES = {
     "s1258": {"unknown_2": "28338"},
     "s1391": {"unknown": "28270"},
@@ -99,16 +89,3 @@ def map_acquisition(label: str) -> AcquisitionRule | None:
 
 def normalize_label(label: str) -> str:
     return re.sub("sub-", "", re.sub("ses-", "", label))
-
-
-def relevant_subject_labels(canonical: str) -> set[str]:
-    return (
-        {canonical}
-        | {label for label, target in SUBJECT_ALIASES.items() if target == canonical}
-        | {
-            source
-            for source, overrides in SESSION_OVERRIDES.items()
-            for override in overrides.values()
-            if override.get("reassign_to") == canonical
-        }
-    )

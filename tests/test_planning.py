@@ -99,31 +99,6 @@ class TestSubjectPlanner(unittest.TestCase):
                         SubjectPlanner(client, self.project_path).plan("s03")
                 self.assertIs(raised.exception.__cause__, failure)
 
-    def test_reassigns_22752_from_s03_to_s10(self) -> None:
-        reassigned = self.session(
-            "22752",
-            2,
-            [
-                self.acquisition("NEW Sag_MPRAGE_T1", 1),
-                self.acquisition("T2w CUBE PROMO .8mm sag", 2),
-                self.acquisition("DTI_pe0_g105", 3),
-                self.acquisition("task-flanker_bold", 4),
-                self.acquisition("fmap-fieldmap", 5),
-            ],
-        )
-        self.planner = self.planner_for_subjects(
-            [
-                FakeSubject("s03", [self.early_session, reassigned]),
-                FakeSubject("s10", []),
-            ]
-        )
-
-        self.assertNotIn("22752", self.source_session_labels(self.planner.plan("s03")))
-        self.assertEqual(
-            [str(plan.relative_prefix).split("/")[0] for plan in self.planner.plan("s10")],
-            ["sub-s10"] * 5,
-        )
-
     def test_falls_back_to_exact_subject_label_when_sdk_filter_misses(self) -> None:
         subject = FakeSubject("s76", [self.early_session])
         project = FakeProject([subject])
@@ -137,39 +112,6 @@ class TestSubjectPlanner(unittest.TestCase):
     def test_unknown_dicom_acquisition_fails_before_download(self) -> None:
         with self.assertRaisesRegex(PlanningError, "no BIDS mapping"):
             self.planner_for_acquisition("unknown-series").plan("s03")
-
-    def test_uses_alias_subject_sessions_with_canonical_destination(self) -> None:
-        plans = self.planner_for_subjects(
-            [
-                FakeSubject(
-                    "s19-2",
-                    [self.session("101", 1, [self.acquisition("NEW Sag_MPRAGE_T1", 1)])],
-                )
-            ]
-        ).plan("s19")
-
-        self.assertEqual(
-            [str(plan.relative_prefix) for plan in plans],
-            ["sub-s19/ses-01/anat/sub-s19_ses-01_acq-SagMPRAGE_run-1_T1w"],
-        )
-
-    def test_excludes_s29_accession_22424(self) -> None:
-        plans = self.planner_for_subjects(
-            [
-                FakeSubject(
-                    "s29",
-                    [
-                        self.session("22424", 1, [self.acquisition("NEW Sag_MPRAGE_T1", 1)]),
-                        self.session("22425", 2, [self.acquisition("task-flanker_bold", 1)]),
-                    ],
-                )
-            ]
-        ).plan("s29")
-
-        self.assertEqual(
-            [str(plan.relative_prefix) for plan in plans],
-            ["sub-s29/ses-01/func/sub-s29_ses-01_task-flanker_run-1_bold"],
-        )
 
     def test_merges_s1258_sessions_under_one_session_number(self) -> None:
         plans = self.planner_for_subjects(

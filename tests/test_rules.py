@@ -4,7 +4,6 @@ from network_fw2bids.rules import (
     AcquisitionRule,
     map_acquisition,
     normalize_label,
-    relevant_subject_labels,
 )
 
 
@@ -27,6 +26,5 @@ class TestRules(unittest.TestCase):
         self.assertIsNone(map_acquisition("3Plane Loc SSFSE"))
         self.assertIsNone(map_acquisition("task-flanker_bold_qa-reject"))
 
-    def test_finds_aliases_and_reassignment_sources(self) -> None:
-        self.assertEqual(relevant_subject_labels("s10"), {"s10", "s03"})
+    def test_normalizes_session_label(self) -> None:
         self.assertEqual(normalize_label("ses-01"), "01")

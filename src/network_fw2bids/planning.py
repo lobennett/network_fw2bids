@@ -42,33 +42,21 @@ class SubjectPlanner:
             raise PlanningError(f"could not read Flywheel project {self._project_path!r}") from exc
 
     def _canonical_sessions(self, project: Any, subject_label: str) -> list[Any]:
-        sessions: list[Any] = []
-        for flywheel_label in sorted(rules.relevant_subject_labels(subject_label)):
-            subject = project.subjects.find_first(f'label="{flywheel_label}"')
-            if subject is None:
-                subject = next(
-                    (
-                        candidate
-                        for candidate in project.subjects()
-                        if candidate.label == flywheel_label
-                    ),
-                    None,
-                )
-            if subject is None:
-                continue
-            for session in subject.sessions():
-                override = rules.SESSION_OVERRIDES.get(flywheel_label, {}).get(
-                    session.label, {}
-                )
-                if override.get("exclude"):
-                    continue
-                canonical = override.get("reassign_to") or rules.SUBJECT_ALIASES.get(
-                    flywheel_label, flywheel_label
-                )
-                if canonical == subject_label:
-                    sessions.append(session)
-        if not sessions:
+        subject = project.subjects.find_first(f'label="{subject_label}"')
+        if subject is None:
+            subject = next(
+                (
+                    candidate
+                    for candidate in project.subjects()
+                    if candidate.label == subject_label
+                ),
+                None,
+            )
+        if subject is None:
             raise PlanningError(f"Flywheel subject {subject_label!r} was not found")
+        sessions = list(subject.sessions())
+        if not sessions:
+            raise PlanningError(f"Flywheel subject {subject_label!r} has no sessions")
         return sessions
 
     def _number_sessions(
