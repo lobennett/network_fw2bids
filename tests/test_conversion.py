@@ -125,6 +125,44 @@ class TestDicomConverter(unittest.TestCase):
             {"Name": "r01network export", "BIDSVersion": "1.10.1"},
         )
 
+    def test_converts_multi_echo_functional_archive(self) -> None:
+        def write_multi_echo_output(command: list[str], **kwargs) -> None:
+            directory = self.output_directory(command)
+            for echo in (1, 2, 3):
+                self.write_output(directory, f"converted_e{echo}", {"EchoNumber": echo})
+
+        self.converter = DicomConverter(
+            runner=write_multi_echo_output, deface_config=self.deface_config
+        )
+        self.converter.convert([self.functional_plan], self.destination, "r01network")
+
+        base = self.destination / self.functional_plan.relative_prefix
+        for echo in (1, 2, 3):
+            prefix = base.with_name(
+                base.name.replace("_bold", f"_echo-{echo}_bold")
+            )
+            self.assertEqual(Path(f"{prefix}.nii.gz").read_bytes(), b"nifti")
+            metadata = json.loads(prefix.with_suffix(".json").read_text())
+            self.assertEqual(metadata["EchoNumber"], echo)
+            self.assertEqual(metadata["TaskName"], "flanker")
+        self.assertFalse(Path(f"{base}.nii.gz").exists())
+
+    def test_rejects_multi_echo_output_without_unique_echo_numbers(self) -> None:
+        for echo_numbers in ((None, 2), (1, 1), (0, 2), (1.5, 2)):
+            with self.subTest(echo_numbers=echo_numbers):
+                def write_invalid_output(command: list[str], **kwargs) -> None:
+                    directory = self.output_directory(command)
+                    for index, echo_number in enumerate(echo_numbers, start=1):
+                        metadata = {} if echo_number is None else {"EchoNumber": echo_number}
+                        self.write_output(directory, f"converted_e{index}", metadata)
+
+                destination = self.root / f"invalid-echo-{echo_numbers!r}"
+                with self.assertRaisesRegex(ConversionError, "EchoNumber"):
+                    DicomConverter(write_invalid_output, self.deface_config).convert(
+                        [self.functional_plan], destination, "r01network"
+                    )
+                self.assertFalse(destination.exists())
+
     def test_invokes_dcm2niix_with_required_arguments(self) -> None:
         self.converter.convert([self.functional_plan], self.destination, "r01network")
 
@@ -439,7 +477,7 @@ class TestDicomConverter(unittest.TestCase):
 
         self.converter = DicomConverter(runner=write_two_images, deface_config=self.deface_config)
 
-        with self.assertRaisesRegex(ConversionError, "expected one converted image"):
+        with self.assertRaisesRegex(ConversionError, "EchoNumber"):
             self.converter.convert([self.functional_plan], self.destination, "r01network")
 
     def test_rejects_missing_fieldmap_role(self) -> None:

@@ -93,11 +93,7 @@ class DicomConverter:
             receipt_path(dataset_root, receipt.subject).relative_to(dataset_root).as_posix(),
         }
         for plan in plans:
-            prefixes = (
-                (Path(f"{plan.relative_prefix}_magnitude"), Path(f"{plan.relative_prefix}_fieldmap"))
-                if plan.modality == "fmap"
-                else (plan.relative_prefix,)
-            )
+            prefixes = cls._published_prefixes(dataset_root, plan)
             for prefix in prefixes:
                 candidates = (Path(f"{prefix}.nii"), Path(f"{prefix}.nii.gz"))
                 images = [candidate for candidate in candidates if (dataset_root / candidate).exists()]
@@ -280,6 +276,9 @@ class DicomConverter:
     ) -> None:
         if plan.modality != "fmap":
             if len(images) != 1:
+                if plan.modality == "func":
+                    cls._place_multi_echo_images(images, plan, dataset_root)
+                    return
                 cls._raise_output_shape_error(
                     f"expected one converted image for {plan.acquisition.label!r}, "
                     f"found {len(images)}"
@@ -317,6 +316,76 @@ class DicomConverter:
                 relative_prefix=relative_prefix,
                 metadata_updates=metadata_updates,
             )
+
+    @classmethod
+    def _place_multi_echo_images(
+        cls, images: list[Path], plan: ArchivePlan, dataset_root: Path
+    ) -> None:
+        if len(images) < 2:
+            cls._raise_output_shape_error("multi-echo conversion requires at least two images")
+        placements: list[tuple[Path, Path]] = []
+        echoes: set[int] = set()
+        for image in images:
+            echo = cls._read_metadata(image).get("EchoNumber")
+            if isinstance(echo, bool) or not isinstance(echo, int) or echo < 1:
+                cls._raise_output_shape_error(
+                    f"multi-echo output {image.name!r} has an invalid EchoNumber"
+                )
+            if echo in echoes:
+                cls._raise_output_shape_error(
+                    f"multi-echo outputs have duplicate EchoNumber {echo}"
+                )
+            echoes.add(echo)
+            placements.append((image, cls._echo_prefix(plan.relative_prefix, echo)))
+        for image, prefix in placements:
+            cls._require_new_image_outputs(image, prefix, dataset_root)
+        for image, prefix in placements:
+            cls._place_image(image, plan, dataset_root, relative_prefix=prefix)
+
+    @classmethod
+    def _echo_prefix(cls, prefix: Path, echo: int) -> Path:
+        name = prefix.name
+        if not name.endswith("_bold"):
+            cls._raise_output_shape_error(
+                f"multi-echo functional prefix does not end in '_bold': {prefix}"
+            )
+        return prefix.with_name(f"{name[:-5]}_echo-{echo}_bold")
+
+    @classmethod
+    def _published_prefixes(cls, dataset_root: Path, plan: ArchivePlan) -> tuple[Path, ...]:
+        if plan.modality == "fmap":
+            return (
+                Path(f"{plan.relative_prefix}_magnitude"),
+                Path(f"{plan.relative_prefix}_fieldmap"),
+            )
+        if plan.modality != "func":
+            return (plan.relative_prefix,)
+        ordinary_images = tuple(
+            candidate
+            for candidate in (
+                Path(f"{plan.relative_prefix}.nii"),
+                Path(f"{plan.relative_prefix}.nii.gz"),
+            )
+            if (dataset_root / candidate).exists()
+        )
+        parent = dataset_root / plan.relative_prefix.parent
+        echo_pattern = f"{plan.relative_prefix.name[:-5]}_echo-*_bold.nii*"
+        echo_images = tuple(parent.glob(echo_pattern)) if parent.is_dir() else ()
+        if ordinary_images and echo_images:
+            raise ConversionError("publishable BIDS staging mixes single- and multi-echo outputs")
+        if ordinary_images:
+            return (plan.relative_prefix,)
+        prefixes = {
+            image.relative_to(dataset_root).with_suffix("")
+            for image in echo_images
+        }
+        prefixes = {
+            prefix.with_suffix("") if prefix.suffix == ".nii" else prefix
+            for prefix in prefixes
+        }
+        if len(prefixes) < 2:
+            raise ConversionError("publishable BIDS staging has an unexpected functional inventory")
+        return tuple(sorted(prefixes))
 
     @classmethod
     def _classify_fieldmap(cls, image: Path) -> str:
