@@ -4,6 +4,7 @@ import ctypes
 import errno
 import os
 from pathlib import Path
+import platform
 import sys
 
 from .errors import ConversionError
@@ -24,13 +25,20 @@ def publish_directory(staged: Path, destination: Path) -> None:
             argument_types = (
                 ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint,
             )
+            return_type = ctypes.c_int
+            if rename is None:
+                syscall_number = {"x86_64": 316, "aarch64": 276}.get(platform.machine())
+                rename = getattr(libc, "syscall", None) if syscall_number is not None else None
+                arguments = (syscall_number, *arguments)
+                argument_types = (ctypes.c_long, *argument_types)
+                return_type = ctypes.c_long
         else:
             rename = None
         if rename is None:
             raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
         # Darwin's flag is RENAME_EXCL. Never fall back to rename/os.replace.
         rename.argtypes = argument_types
-        rename.restype = ctypes.c_int
+        rename.restype = return_type if sys.platform == "linux" else ctypes.c_int
         if rename(*arguments) != 0:
             error = ctypes.get_errno()
             raise OSError(error, os.strerror(error), str(destination))

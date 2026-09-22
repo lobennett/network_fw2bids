@@ -1,14 +1,49 @@
+import ctypes
 import errno
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import network_fw2bids._publication as publication
 from network_fw2bids._publication import publish_directory
 from network_fw2bids.errors import ConversionError
 
 
+class NativeCall:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+        self.argtypes = None
+        self.restype = None
+
+    def __call__(self, *arguments: object) -> int:
+        self.calls.append(arguments)
+        return 0
+
+
+class OldLinuxLibc:
+    def __init__(self) -> None:
+        self.syscall = NativeCall()
+
+
 class TestAtomicPublication(unittest.TestCase):
+    def test_linux_uses_syscall_when_libc_has_no_renameat2_wrapper(self) -> None:
+        libc = OldLinuxLibc()
+        source = Path("/staged")
+        destination = Path("/destination")
+        with (
+            patch.object(publication.ctypes, "CDLL", return_value=libc),
+            patch.object(publication.sys, "platform", "linux"),
+            patch.object(publication.platform, "machine", return_value="x86_64"),
+        ):
+            publish_directory(source, destination)
+
+        self.assertEqual(
+            libc.syscall.calls,
+            [(316, -100, bytes(source), -100, bytes(destination), 1)],
+        )
+        self.assertIs(libc.syscall.restype, ctypes.c_long)
+
     def test_success_moves_the_complete_directory(self) -> None:
         with TemporaryDirectory() as scratch:
             staged = Path(scratch) / "staged"
