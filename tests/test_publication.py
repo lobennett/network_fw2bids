@@ -27,6 +27,27 @@ class OldLinuxLibc:
 
 
 class TestAtomicPublication(unittest.TestCase):
+    def test_linux_filesystem_without_noreplace_uses_destination_reservation(self) -> None:
+        class UnsupportedCall(NativeCall):
+            def __call__(self, *arguments: object) -> int:
+                self.calls.append(arguments)
+                return -1
+
+        libc = type("Libc", (), {"renameat2": UnsupportedCall()})()
+        with TemporaryDirectory() as scratch:
+            staged = Path(scratch) / "staged"
+            staged.mkdir()
+            (staged / "complete").write_bytes(b"dataset")
+            destination = Path(scratch) / "bids"
+            with (
+                patch.object(publication.ctypes, "CDLL", return_value=libc),
+                patch.object(publication.ctypes, "get_errno", return_value=errno.EINVAL),
+                patch.object(publication.sys, "platform", "linux"),
+            ):
+                publish_directory(staged, destination)
+
+            self.assertFalse(staged.exists())
+            self.assertEqual((destination / "complete").read_bytes(), b"dataset")
     def test_linux_uses_syscall_when_libc_has_no_renameat2_wrapper(self) -> None:
         libc = OldLinuxLibc()
         source = Path("/staged")

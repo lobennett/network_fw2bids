@@ -41,8 +41,31 @@ def publish_directory(staged: Path, destination: Path) -> None:
         rename.restype = return_type if sys.platform == "linux" else ctypes.c_int
         if rename(*arguments) != 0:
             error = ctypes.get_errno()
+            if sys.platform == "linux" and error in {
+                errno.EINVAL,
+                errno.ENOTSUP,
+                errno.EOPNOTSUPP,
+            }:
+                _publish_with_reservation(staged, destination)
+                return
             raise OSError(error, os.strerror(error), str(destination))
     except OSError as exc:
         raise ConversionError(
             f"could not publish BIDS dataset without replacing {destination}: {exc}"
         ) from exc
+
+
+def _publish_with_reservation(staged: Path, destination: Path) -> None:
+    """Reserve an absent destination before a filesystem-compatible rename."""
+    destination.mkdir(mode=0o700)
+    reservation = destination.lstat()
+    try:
+        os.rename(staged, destination)
+    except OSError:
+        try:
+            current = destination.lstat()
+            if current.st_ino == reservation.st_ino and current.st_dev == reservation.st_dev:
+                destination.rmdir()
+        except OSError:
+            pass
+        raise
