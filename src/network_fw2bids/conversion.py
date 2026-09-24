@@ -1,6 +1,7 @@
 """DICOM archive conversion and atomic BIDS dataset publication."""
 
 import json
+import re
 from pathlib import Path, PureWindowsPath
 import shutil
 import stat
@@ -51,8 +52,12 @@ class DicomConverter:
                     staged = sensitive / "bids"
                     staged.mkdir()
                     self._write_dataset_description(staged, dataset_name)
-                    for index, plan in enumerate(plans):
-                        self._convert_archive(plan, staged, sensitive / f"archive-{index}")
+                    archives = [self._convert_archive(plan, staged, sensitive / f"archive-{index}")
+                                for index, plan in enumerate(plans)]
+                    provenance = staged / f"code/network_fw2bids/conversion/sub-{subject}.json"
+                    provenance.parent.mkdir(parents=True, exist_ok=True)
+                    provenance.write_text(json.dumps({"schema_version": 1, "subject": subject,
+                                                      "archives": archives}, indent=2) + "\n")
                     from .defacing import deface_dataset
 
                     receipt = deface_dataset(staged, subject, self._deface_config, self._runner)
@@ -92,6 +97,9 @@ class DicomConverter:
             "dataset_description.json",
             receipt_path(dataset_root, receipt.subject).relative_to(dataset_root).as_posix(),
         }
+        provenance = dataset_root / f"code/network_fw2bids/conversion/sub-{receipt.subject}.json"
+        if provenance.exists():
+            expected_files.add(provenance.relative_to(dataset_root).as_posix())
         for plan in plans:
             prefixes = cls._published_prefixes(dataset_root, plan)
             for prefix in prefixes:
@@ -200,7 +208,7 @@ class DicomConverter:
 
     def _convert_archive(
         self, plan: ArchivePlan, dataset_root: Path, workspace: Path
-    ) -> None:
+    ) -> dict:
         workspace.mkdir()
         archive_path = workspace / "dicom.zip"
         self._download(plan, archive_path)
@@ -211,7 +219,7 @@ class DicomConverter:
 
         converted_directory = workspace / "converted"
         converted_directory.mkdir()
-        self._run_dcm2niix(dicom_directory, converted_directory)
+        version = self._run_dcm2niix(dicom_directory, converted_directory)
         try:
             images = sorted(
                 path
@@ -221,6 +229,20 @@ class DicomConverter:
         except OSError as exc:
             raise ConversionError("could not inspect dcm2niix output") from exc
         self._place_converted_images(images, plan, dataset_root)
+        outputs = []
+        for prefix in self._published_prefixes(dataset_root, plan):
+            for extension in (".nii", ".nii.gz", ".json", ".bval", ".bvec"):
+                relative = Path(str(prefix) + extension)
+                path = dataset_root / relative
+                if path.is_file():
+                    outputs.append({"path": relative.as_posix(), "sha256": self._sha256(path)})
+        def identifier(obj, key):
+            value = getattr(obj, key, None)
+            return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) else None
+        return {"acquisition_id": identifier(plan.acquisition, "id"),
+                "file_id": identifier(plan.dicom_file, "file_id"),
+                "archive_sha256": self._sha256(archive_path),
+                "dcm2niix_version": version, "outputs": outputs}
 
     @staticmethod
     def _download(plan: ArchivePlan, archive_path: Path) -> None:
@@ -250,7 +272,7 @@ class DicomConverter:
         except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
             raise ConversionError(f"could not safely extract DICOM archive: {exc}") from exc
 
-    def _run_dcm2niix(self, dicom_directory: Path, converted_directory: Path) -> None:
+    def _run_dcm2niix(self, dicom_directory: Path, converted_directory: Path) -> str | None:
         command = [
             "dcm2niix",
             "-b",
@@ -266,7 +288,10 @@ class DicomConverter:
             str(dicom_directory),
         ]
         try:
-            self._runner(command, check=True, capture_output=True, text=True)
+            result = self._runner(command, check=True, capture_output=True, text=True)
+            output = getattr(result, "stdout", "")
+            version = re.search(r"(?:version|v)\s*(v?\d+\.\d+\.\d+)", output) if isinstance(output, str) else None
+            return version.group(1) if version else None
         except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
             raise ConversionError("dcm2niix conversion failed") from exc
 

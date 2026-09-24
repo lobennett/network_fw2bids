@@ -123,6 +123,10 @@ def assemble_subject_parts(subjects_file: Path, parts_directory: Path, destinati
                 receipt_destination = receipt_path(staged, subject)
                 receipt_destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(receipt_path(parts_directory / subject, subject), receipt_destination)
+                conversion = Path(f"code/network_fw2bids/conversion/sub-{subject}.json")
+                if (parts_directory / subject / conversion).is_file():
+                    (staged / conversion).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(parts_directory / subject / conversion, staged / conversion)
             for subject in subjects:
                 verify_subject_defacing(staged, subject)
             publish_directory(staged, destination)

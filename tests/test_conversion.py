@@ -542,3 +542,17 @@ class TestDicomConverter(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_archive_hash_is_saved_without_dicom_content(self):
+        self.functional_plan.acquisition.id = 'acquisition123'
+        self.converter.convert([self.functional_plan], self.destination, 'Network')
+        path = self.destination / 'code/network_fw2bids/conversion/sub-s03.json'
+        evidence = json.loads(path.read_text())
+        source = evidence['archives'][0]
+        self.assertEqual(source['acquisition_id'], 'acquisition123')
+        self.assertEqual(len(source['archive_sha256']), 64)
+        self.assertTrue(source['outputs'])
+        self.assertNotIn('test acquisition', path.read_text())
+        for output in source['outputs']:
+            self.assertEqual(output['sha256'], hashlib.sha256((self.destination / output['path']).read_bytes()).hexdigest())
