@@ -196,3 +196,22 @@ class TestSubjectPlanner(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_selection_inventory_records_skips_and_selected_destination():
+    start = datetime(2026, 1, 1)
+    rejected = FakeAcquisition('NEW Sag_MPRAGE_T1_qa-reject', start)
+    selected = FakeAcquisition('task-goNogo_bold', start)
+    rejected.id, selected.id = 'rejected-id', 'selected-id'
+    planner = SubjectPlanner(FakeClient(FakeProject([FakeSubject('s03', [FakeSession('100', start, [rejected, selected])])])), 'russpold/r01network')
+    plans = planner.plan('s03')
+    receipt = planner.selection
+    assert receipt['snapshot_kind'] == 'current_inventory'
+    assert receipt['subject'] == 's03'
+    reject, keep = receipt['acquisitions']
+    assert reject['decision'] == 'skipped'
+    assert reject['reason'] == 'qa-reject'
+    assert reject['acquisition_id'] == 'rejected-id'
+    assert keep['decision'] == 'selected'
+    assert keep['bids_prefix'] == plans[0].relative_prefix.as_posix()
+    assert 'run-1' in keep['bids_prefix']

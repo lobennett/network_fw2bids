@@ -19,6 +19,9 @@ Planning is the default and does not download data:
 uv run --env-file .env network-fw2bids --subject s03
 ```
 
+Add `--inventory selection/sub-s03.json` to save current selection and skip reasons.
+Executed conversions include the selection in their conversion receipt.
+
 Review the plan, then run the conversion with the pinned PyDeface image:
 
 ```bash

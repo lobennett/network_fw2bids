@@ -155,3 +155,16 @@ class TestPublicExports(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_modified_plan_cannot_claim_original_selection():
+    start=datetime(2026,1,1)
+    source=FakeClient(FakeProject([FakeSubject('s03',[FakeSession('100',start,[FakeAcquisition('task-goNogo_bold',start),FakeAcquisition('task-rest_bold',start)])])]))
+    instance=FlywheelBIDS(source)
+    plans=instance.plan_subject('s03')
+    plans.pop()
+    instance._converter=Mock()
+    import pytest
+    with pytest.raises(PlanningError,match='changed'):
+        instance.convert_subject('s03',Path('/tmp/unused'),plans=plans)
+    instance._converter.convert.assert_not_called()

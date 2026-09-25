@@ -540,10 +540,6 @@ class TestDicomConverter(unittest.TestCase):
         self.assertFalse(self.destination.exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
     def test_archive_hash_is_saved_without_dicom_content(self):
         self.functional_plan.acquisition.id = 'acquisition123'
         self.converter.convert([self.functional_plan], self.destination, 'Network')
@@ -556,3 +552,17 @@ if __name__ == "__main__":
         self.assertNotIn('test acquisition', path.read_text())
         for output in source['outputs']:
             self.assertEqual(output['sha256'], hashlib.sha256((self.destination / output['path']).read_bytes()).hexdigest())
+
+
+    def test_conversion_receipt_includes_actual_selection(self):
+        selection = {'schema_version': 1, 'subject': 's03', 'snapshot_kind': 'current_inventory',
+                     'acquisitions': [{'label': 'rejected_qa-reject', 'decision': 'skipped', 'reason': 'qa-reject'}]}
+        self.converter.convert([self.functional_plan], self.destination, 'Network', selection=selection)
+        record = json.loads((self.destination / 'code/network_fw2bids/conversion/sub-s03.json').read_text())
+        self.assertEqual(record['selection']['snapshot_kind'], 'conversion_selection')
+        self.assertEqual(record['selection']['acquisitions'][0]['reason'], 'qa-reject')
+        self.assertEqual(selection['snapshot_kind'], 'current_inventory')
+
+
+if __name__ == '__main__':
+    unittest.main()

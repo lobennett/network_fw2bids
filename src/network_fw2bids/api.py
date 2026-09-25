@@ -31,6 +31,7 @@ class FlywheelBIDS:
         self._project_path = project_path
         self._planner = SubjectPlanner(client, project_path)
         self._converter = DicomConverter(runner, deface_config)
+        self._planned_signature: tuple | None = None
 
     @classmethod
     def from_token(
@@ -49,7 +50,16 @@ class FlywheelBIDS:
         return cls(client, project_path, deface_config=deface_config)
 
     def plan_subject(self, subject_label: str) -> list[ArchivePlan]:
-        return self._planner.plan(subject_label)
+        self._planned_signature = None
+        plans = self._planner.plan(subject_label)
+        self._planned_signature = _plan_signature(plans)
+        return plans
+
+    @property
+    def selection(self) -> dict | None:
+        """Metadata-only inventory from the most recent successful planning call."""
+        from copy import deepcopy
+        return deepcopy(self._planner.selection)
 
     def convert_subject(
         self,
@@ -58,8 +68,20 @@ class FlywheelBIDS:
         plans: list[ArchivePlan] | None = None,
     ) -> None:
         resolved = plans if plans is not None else self.plan_subject(subject_label)
-        self._converter.convert(resolved, destination, self._project_path)
+        if self.selection is not None:
+            if _plan_signature(resolved) != self._planned_signature:
+                raise PlanningError("plans changed after selection; re-plan before conversion")
+            self._converter.convert(resolved, destination, self._project_path, selection=self.selection)
+        else:
+            self._converter.convert(resolved, destination, self._project_path)
 
 
 def _require_pinned_deface_config(config: DefaceConfig) -> None:
     config.validate()
+
+
+def _plan_signature(plans: list[ArchivePlan]) -> tuple:
+    return tuple((str(p.relative_prefix), p.modality, p.task,
+                  getattr(p.acquisition, "id", None), p.acquisition.label,
+                  p.dicom_file.name, getattr(p.dicom_file, "file_id", None),
+                  getattr(p.dicom_file, "size", None)) for p in plans)

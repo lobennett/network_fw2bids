@@ -33,6 +33,8 @@ class DicomConverter:
         plans: Sequence[ArchivePlan],
         destination: Path,
         dataset_name: str,
+        *,
+        selection: dict | None = None,
     ) -> None:
         destination = Path(destination)
         for plan in plans:
@@ -56,8 +58,10 @@ class DicomConverter:
                                 for index, plan in enumerate(plans)]
                     provenance = staged / f"code/network_fw2bids/conversion/sub-{subject}.json"
                     provenance.parent.mkdir(parents=True, exist_ok=True)
-                    provenance.write_text(json.dumps({"schema_version": 1, "subject": subject,
-                                                      "archives": archives}, indent=2) + "\n")
+                    record = {"schema_version": 1, "subject": subject, "archives": archives}
+                    if selection is not None:
+                        record["selection"] = {**selection, "snapshot_kind": "conversion_selection"}
+                    provenance.write_text(json.dumps(record, indent=2) + "\n")
                     from .defacing import deface_dataset
 
                     receipt = deface_dataset(staged, subject, self._deface_config, self._runner)

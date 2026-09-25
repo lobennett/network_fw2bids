@@ -1,6 +1,7 @@
 """Command-line interface for planning and converting one Flywheel subject."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import Callable
@@ -19,6 +20,7 @@ def get_parser() -> argparse.ArgumentParser:
         "--project", default="russpold/r01network", help="Flywheel group/project path"
     )
     parser.add_argument("--output", type=Path, help="new BIDS dataset directory")
+    parser.add_argument("--inventory", type=Path, help="write the current acquisition selection as metadata-only JSON")
     parser.add_argument(
         "--execute",
         action="store_true",
@@ -62,6 +64,9 @@ def main(
     try:
         converter = factory(token, project_path=args.project, deface_config=config)
         plans = converter.plan_subject(args.subject)
+        if args.inventory:
+            args.inventory.parent.mkdir(parents=True, exist_ok=True)
+            args.inventory.write_text(json.dumps(converter.selection, indent=2) + "\n")
         for plan in plans:
             print(f"{plan.acquisition.label}: {plan.dicom_file.name} -> {plan.relative_prefix}")
         print(f"{len(plans)} DICOM archives planned for {args.subject}")

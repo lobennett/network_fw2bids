@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 from typing import Any
@@ -22,8 +23,10 @@ class SubjectPlanner:
     def __init__(self, client: Any, project_path: str) -> None:
         self._client = client
         self._project_path = project_path
+        self.selection: dict | None = None
 
     def plan(self, subject_label: str) -> list[ArchivePlan]:
+        self.selection = None
         if not re.fullmatch(r"[A-Za-z0-9]+", subject_label):
             raise PlanningError("BIDS subject label must contain only ASCII letters and digits")
         if subject_label == "n01":
@@ -37,7 +40,15 @@ class SubjectPlanner:
                 )
             sessions = self._canonical_sessions(project, subject_label)
             session_numbers = self._number_sessions(sessions, subject_label)
-            return self._build_plans(subject_label, sessions, session_numbers)
+            rows: list[dict] = []
+            plans = self._build_plans(subject_label, sessions, session_numbers, rows)
+            self.selection = {
+                "schema_version": 1, "snapshot_kind": "current_inventory",
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+                "project": self._project_path, "project_id": getattr(project, "id", None),
+                "subject": subject_label, "acquisitions": rows,
+            }
+            return plans
         except ApiException as exc:
             raise PlanningError(f"could not read Flywheel project {self._project_path!r}") from exc
 
@@ -86,6 +97,7 @@ class SubjectPlanner:
         subject_label: str,
         sessions: list[Any],
         session_numbers: dict[str, int],
+        rows: list[dict],
     ) -> list[ArchivePlan]:
         plans: list[ArchivePlan] = []
         run_counts_by_session: dict[int, dict[str, int]] = {}
@@ -100,6 +112,17 @@ class SubjectPlanner:
             run_counts = run_counts_by_session.setdefault(session_number, {})
             for acquisition in sorted(session.acquisitions(), key=self._timestamp_key):
                 dicom_files = [file for file in acquisition.files if file.type == "dicom"]
+                row = {
+                    "session": session_label,
+                    "session_id": getattr(session, "id", None),
+                    "session_label": session.label,
+                    "acquisition_id": getattr(acquisition, "id", None),
+                    "label": acquisition.label,
+                    "files": [{"name": f.name, "id": getattr(f, "file_id", None),
+                               "size": getattr(f, "size", None)} for f in dicom_files],
+                    "decision": "skipped", "reason": "no_dicom", "bids_prefix": None,
+                }
+                rows.append(row)
                 if not dicom_files:
                     continue
                 rule = rules.map_acquisition(acquisition.label)
@@ -108,6 +131,7 @@ class SubjectPlanner:
                         acquisition.label in rules.SKIP_ACQUISITIONS
                         or acquisition.label.endswith("_qa-reject")
                     ):
+                        row["reason"] = "qa-reject" if acquisition.label.endswith("_qa-reject") else "excluded_acquisition_type"
                         continue
                     raise PlanningError(
                         f"no BIDS mapping for acquisition {acquisition.label!r}"
@@ -120,6 +144,7 @@ class SubjectPlanner:
                 prefix = self._build_prefix(
                     subject_label, session_label, rule, run_counts
                 )
+                row.update(decision="selected", reason="mapped_to_bids", bids_prefix=prefix.as_posix())
                 plans.append(
                     ArchivePlan(
                         acquisition=acquisition,
