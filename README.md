@@ -1,7 +1,10 @@
 # network_fw2bids
 
 `network-fw2bids` downloads one r01network subject from Flywheel and converts it to
-BIDS using the study's fixed acquisition and session mappings.
+BIDS using the study's fixed acquisition and session mappings. DICOMs use dcm2niix;
+GE P-file fieldmaps import the existing CNI spiral-recon magnitude and Hz outputs.
+Missing reconstructions must be generated on Flywheel first. Magnitude repeats are
+preserved; singleton dimensions and identifying header/JSON fields are removed.
 
 ## Setup
 

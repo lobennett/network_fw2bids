@@ -68,8 +68,9 @@ def main(
             args.inventory.parent.mkdir(parents=True, exist_ok=True)
             args.inventory.write_text(json.dumps(converter.selection, indent=2) + "\n")
         for plan in plans:
-            print(f"{plan.acquisition.label}: {plan.dicom_file.name} -> {plan.relative_prefix}")
-        print(f"{len(plans)} DICOM archives planned for {args.subject}")
+            names = ', '.join(f.name for f in plan.source_files)
+            print(f"{plan.acquisition.label}: {names} -> {plan.relative_prefix}")
+        print(f"{len(plans)} acquisitions planned for {args.subject}")
         if args.execute:
             converter.convert_subject(args.subject, args.output, plans=plans)
             print(f"BIDS dataset written to {args.output}")

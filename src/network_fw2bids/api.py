@@ -83,5 +83,5 @@ def _require_pinned_deface_config(config: DefaceConfig) -> None:
 def _plan_signature(plans: list[ArchivePlan]) -> tuple:
     return tuple((str(p.relative_prefix), p.modality, p.task,
                   getattr(p.acquisition, "id", None), p.acquisition.label,
-                  p.dicom_file.name, getattr(p.dicom_file, "file_id", None),
-                  getattr(p.dicom_file, "size", None)) for p in plans)
+                  tuple((f.name, getattr(f, 'file_id', None), getattr(f, 'size', None))
+                        for f in p.source_files)) for p in plans)

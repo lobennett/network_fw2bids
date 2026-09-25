@@ -7,6 +7,7 @@ from typing import Any
 from flywheel.rest import ApiException
 
 from .errors import PlanningError
+from .fieldmaps import FieldmapPlan, plan_fieldmap
 from . import rules
 
 
@@ -18,6 +19,10 @@ class ArchivePlan:
     modality: str
     task: str | None = None
 
+    @property
+    def source_files(self) -> tuple:
+        return (self.dicom_file,)
+
 
 class SubjectPlanner:
     def __init__(self, client: Any, project_path: str) -> None:
@@ -25,7 +30,7 @@ class SubjectPlanner:
         self._project_path = project_path
         self.selection: dict | None = None
 
-    def plan(self, subject_label: str) -> list[ArchivePlan]:
+    def plan(self, subject_label: str) -> list[ArchivePlan | FieldmapPlan]:
         self.selection = None
         if not re.fullmatch(r"[A-Za-z0-9]+", subject_label):
             raise PlanningError("BIDS subject label must contain only ASCII letters and digits")
@@ -98,8 +103,8 @@ class SubjectPlanner:
         sessions: list[Any],
         session_numbers: dict[str, int],
         rows: list[dict],
-    ) -> list[ArchivePlan]:
-        plans: list[ArchivePlan] = []
+    ) -> list[ArchivePlan | FieldmapPlan]:
+        plans: list[ArchivePlan | FieldmapPlan] = []
         run_counts_by_session: dict[int, dict[str, int]] = {}
         for session in sorted(sessions, key=self._timestamp_key):
             normalized_session = rules.normalize_label(session.label)
@@ -119,12 +124,10 @@ class SubjectPlanner:
                     "acquisition_id": getattr(acquisition, "id", None),
                     "label": acquisition.label,
                     "files": [{"name": f.name, "id": getattr(f, "file_id", None),
-                               "size": getattr(f, "size", None)} for f in dicom_files],
+                               "size": getattr(f, "size", None)} for f in acquisition.files],
                     "decision": "skipped", "reason": "no_dicom", "bids_prefix": None,
                 }
                 rows.append(row)
-                if not dicom_files:
-                    continue
                 rule = rules.map_acquisition(acquisition.label)
                 if rule is None:
                     if (
@@ -133,9 +136,22 @@ class SubjectPlanner:
                     ):
                         row["reason"] = "qa-reject" if acquisition.label.endswith("_qa-reject") else "excluded_acquisition_type"
                         continue
+                    if not dicom_files:
+                        continue
                     raise PlanningError(
                         f"no BIDS mapping for acquisition {acquisition.label!r}"
                     )
+                if rule.modality == 'fmap' and not dicom_files:
+                    # Flywheel's session listing omits file.info; fetch the full
+                    # acquisition before validating reconstruction metadata.
+                    if any('SPIREC' not in (getattr(f, 'info', None) or {}) for f in acquisition.files if f.type == 'nifti'):
+                        acquisition = self._client.get_acquisition(acquisition.id)
+                    prefix = self._build_prefix(subject_label, session_label, rule, run_counts)
+                    plans.append(plan_fieldmap(acquisition, prefix))
+                    row.update(decision='selected', reason='cni_spiral_reconstruction', bids_prefix=prefix.as_posix())
+                    continue
+                if not dicom_files:
+                    continue
                 if len(dicom_files) != 1:
                     raise PlanningError(
                         f"expected one DICOM archive for {acquisition.label!r}, "

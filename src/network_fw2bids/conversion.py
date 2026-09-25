@@ -16,6 +16,7 @@ from ._publication import publish_directory
 from .defacing import DefaceConfig, DefacingReceipt, inventory_anatomy, load_receipt, receipt_path, write_receipt_atomic
 from .errors import ConversionError, DefacingError
 from .planning import ArchivePlan
+from .fieldmaps import FieldmapPlan, import_fieldmap
 from .sensitive_workspace import sensitive_workspace
 
 
@@ -211,9 +212,14 @@ class DicomConverter:
             raise ConversionError("could not write dataset description") from exc
 
     def _convert_archive(
-        self, plan: ArchivePlan, dataset_root: Path, workspace: Path
+        self, plan: ArchivePlan | FieldmapPlan, dataset_root: Path, workspace: Path
     ) -> dict:
         workspace.mkdir()
+        if isinstance(plan, FieldmapPlan):
+            images, record = import_fieldmap(plan, workspace)
+            self._place_converted_images(images, plan, dataset_root)
+            record['outputs'] = self._output_records(dataset_root, plan)
+            return record
         archive_path = workspace / "dicom.zip"
         self._download(plan, archive_path)
 
@@ -233,6 +239,15 @@ class DicomConverter:
         except OSError as exc:
             raise ConversionError("could not inspect dcm2niix output") from exc
         self._place_converted_images(images, plan, dataset_root)
+        def identifier(obj, key):
+            value = getattr(obj, key, None)
+            return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) else None
+        return {"acquisition_id": identifier(plan.acquisition, "id"),
+                "file_id": identifier(plan.dicom_file, "file_id"),
+                "archive_sha256": self._sha256(archive_path),
+                "dcm2niix_version": version, "outputs": self._output_records(dataset_root, plan)}
+
+    def _output_records(self, dataset_root, plan):
         outputs = []
         for prefix in self._published_prefixes(dataset_root, plan):
             for extension in (".nii", ".nii.gz", ".json", ".bval", ".bvec"):
@@ -240,13 +255,7 @@ class DicomConverter:
                 path = dataset_root / relative
                 if path.is_file():
                     outputs.append({"path": relative.as_posix(), "sha256": self._sha256(path)})
-        def identifier(obj, key):
-            value = getattr(obj, key, None)
-            return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) else None
-        return {"acquisition_id": identifier(plan.acquisition, "id"),
-                "file_id": identifier(plan.dicom_file, "file_id"),
-                "archive_sha256": self._sha256(archive_path),
-                "dcm2niix_version": version, "outputs": outputs}
+        return outputs
 
     @staticmethod
     def _download(plan: ArchivePlan, archive_path: Path) -> None:
@@ -430,6 +439,8 @@ class DicomConverter:
             cls._raise_output_shape_error(f"invalid fieldmap metadata in {image.name!r}")
         image_type = {value.upper() for value in image_type}
         component = component.upper()
+        if source_stem == 'fieldmap' and metadata.get('Units') == 'Hz':
+            return 'fieldmap'
         if source_stem.lower().endswith("_ph") or "P" in image_type or component == "PHASE":
             return "fieldmap"
         return "magnitude"

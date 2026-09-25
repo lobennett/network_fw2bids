@@ -14,15 +14,17 @@ from flywheel.rest import ApiException
 from network_fw2bids import FlywheelBIDS
 from network_fw2bids.cli import main
 from network_fw2bids.errors import PlanningError
+from network_fw2bids.planning import ArchivePlan
 from tests.fakes import FakeAcquisition, FakeClient, FakeProject, FakeSession, FakeSubject
 
 
 class FakeFlywheelBIDS:
     def __init__(self) -> None:
         self.plans = [
-            SimpleNamespace(
+            ArchivePlan(
                 acquisition=SimpleNamespace(label="task-flanker_bold"),
                 dicom_file=SimpleNamespace(name="scan.dicom.zip"),
+                modality='func', task='flanker',
                 relative_prefix=Path(
                     "sub-s03/ses-01/func/sub-s03_ses-01_task-flanker_run-1_bold"
                 ),
