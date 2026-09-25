@@ -1,6 +1,7 @@
 """DICOM archive conversion and atomic BIDS dataset publication."""
 
 import json
+from importlib.metadata import PackageNotFoundError, version as package_version
 import re
 from pathlib import Path, PureWindowsPath
 import shutil
@@ -59,7 +60,12 @@ class DicomConverter:
                                 for index, plan in enumerate(plans)]
                     provenance = staged / f"code/network_fw2bids/conversion/sub-{subject}.json"
                     provenance.parent.mkdir(parents=True, exist_ok=True)
-                    record = {"schema_version": 1, "subject": subject, "archives": archives}
+                    try:
+                        version = package_version("network-fw2bids")
+                    except PackageNotFoundError:
+                        version = None  # Source checkout without installed distribution metadata.
+                    record = {"schema_version": 1, "subject": subject, "archives": archives,
+                              "software": {"network_fw2bids": version}}
                     if selection is not None:
                         record["selection"] = {**selection, "snapshot_kind": "conversion_selection"}
                     provenance.write_text(json.dumps(record, indent=2) + "\n")
